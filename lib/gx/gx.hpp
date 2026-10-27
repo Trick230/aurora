@@ -52,6 +52,7 @@ constexpr bool UseReversedZ = true;
 
 constexpr u32 MaxTextures = GX_MAX_TEXMAP;
 constexpr u32 MaxTluts = 20;
+constexpr u32 MaxTmemTlutOffsets = 1024;
 constexpr u32 MaxTevStages = GX_MAX_TEVSTAGE;
 constexpr u32 MaxColorChannels = 4;
 constexpr u32 MaxTevRegs = 4; // TEVPREV, TEVREG0-2
@@ -321,6 +322,10 @@ struct GXState {
   std::array<gfx::TextureBind, MaxTextures> textures;
   std::array<GXTexObj_, MaxTextures> loadedTextures;
   std::array<GXTlutObj_, MaxTluts> loadedTluts;
+  std::array<GXTlutObj_, MaxTmemTlutOffsets> loadedTmemTluts;
+  std::array<bool, MaxTextures> loadedTextureTlutValid{};
+  std::array<u16, MaxTextures> loadedTextureTlutTmemOffsets{};
+  std::array<GXTlutFmt, MaxTextures> loadedTextureTlutFormats{};
   AuroraViewportPolicy viewportPolicy = AURORA_VIEWPORT_FIT;
   gfx::Viewport logicalViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};
   gfx::Viewport renderViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};
@@ -349,6 +354,7 @@ struct GXState {
   u32 texCopyDstHeight = 0;
   bool texCopyDstWide = false;
   const void* texCopyDest = nullptr;
+  u32 texCopyDestPhysical = UINT32_MAX;
   struct CopyTextureKey {
     const void* dest = nullptr;
     u32 width = 0;

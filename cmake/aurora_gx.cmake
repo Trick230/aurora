@@ -2,6 +2,7 @@ add_library(aurora_gx STATIC
         lib/gfx/clear.cpp
         lib/gfx/common.cpp
         lib/gfx/depth_peek.cpp
+        lib/gfx/efb_readback.cpp
         lib/gfx/pipeline_cache.cpp
         lib/gfx/render_worker.cpp
         lib/gfx/dds_io.cpp
@@ -17,6 +18,7 @@ add_library(aurora_gx STATIC
         lib/gx/fifo.cpp
         lib/gx/gx.cpp
         lib/gx/pipeline.cpp
+        lib/gx/recomp.cpp
         lib/gx/shader.cpp
         lib/gx/shader_info.cpp
         lib/dolphin/gx/GXBump.cpp
@@ -53,4 +55,15 @@ if (AURORA_ENABLE_RMLUI)
         lib/rmlui/pipeline.cpp
         lib/rmlui/pipeline.hpp
     )
+endif ()
+
+# gxcore (63/S12): Dolphin-ported GX core draws on this substrate. Present
+# only when the fork builds inside GXRuntime with the recomp modules on.
+if (TARGET GXRuntime::gxcore)
+    target_sources(aurora_gx PRIVATE
+        lib/gfx/gxcore_draw.cpp
+        lib/gfx/gxcore_draw.hpp
+    )
+    target_link_libraries(aurora_gx PRIVATE GXRuntime::gxcore)
+    target_compile_definitions(aurora_gx PRIVATE AURORA_ENABLE_GXCORE=1)
 endif ()

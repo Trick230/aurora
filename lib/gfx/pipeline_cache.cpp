@@ -3,6 +3,9 @@
 #include "clear.hpp"
 #include "../fs_helper.hpp"
 #include "../gx/pipeline.hpp"
+#ifdef AURORA_ENABLE_GXCORE
+#include "gxcore_draw.hpp"
+#endif
 #ifdef AURORA_ENABLE_RMLUI
 #include "../rmlui/pipeline.hpp"
 #endif
@@ -12,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <limits>
@@ -432,6 +436,19 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
                                       PipelinePriority priority = PipelinePriority::Normal,
                                       std::optional<uint32_t> firstFrameUsedOverride = std::nullopt) {
   ZoneScoped;
+
+  // GXRuntime recomp patch (0006): draws are silently skipped while their
+  // pipeline compiles (bind_pipeline returns false), which makes cold and
+  // warm runs render different frames. AURORA_SYNC_PIPELINES=1 promotes
+  // draw-path pipeline creation to the existing Blocking priority so replay
+  // output is deterministic. Upstream remedy: an AuroraConfig field.
+  static const bool s_syncPipelines = [] {
+    const char* value = std::getenv("AURORA_SYNC_PIPELINES");
+    return value != nullptr && value[0] != '0';
+  }();
+  if (s_syncPipelines && priority == PipelinePriority::Normal) {
+    priority = PipelinePriority::Blocking;
+  }
 
   const PipelineRef hash = xxh3_hash(config, static_cast<HashType>(type));
   const bool blocking = priority == PipelinePriority::Blocking;
@@ -866,6 +883,16 @@ static void prune_old_pipeline_cache_versions() {
     pipeline_cache_abort();
   }
 #endif
+
+#ifdef AURORA_ENABLE_GXCORE
+  const auto gxcoreDelete = fmt::format("DELETE FROM pipeline_cache WHERE type = {} AND config_version < {}",
+                                        underlying(ShaderType::GXCore), gxcore::GXCorePipelineConfigVersion);
+  ret = sqlite::exec(g_pipelineCacheDb, gxcoreDelete.c_str());
+  if (ret != SQLITE_OK) {
+    Log.error("Failed to prune GXCore pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    pipeline_cache_abort();
+  }
+#endif
 }
 
 static bool write_pipeline_cache_record(const PipelineCacheWrite& write) {
@@ -1070,6 +1097,10 @@ static size_t load_pipeline_cache() {
       ShaderType::Clear, clear::ClearPipelineConfigVersion, clear::create_pipeline);
   acceptedRows +=
       load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion, gx::create_pipeline);
+#ifdef AURORA_ENABLE_GXCORE
+  acceptedRows += load_pipeline_cache_entries<gxcore::PipelineConfig>(
+      ShaderType::GXCore, gxcore::GXCorePipelineConfigVersion, gxcore::create_pipeline);
+#endif
   return acceptedRows;
 }
 
@@ -1111,6 +1142,13 @@ PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, New
 template <>
 PipelineRef find_pipeline(ShaderType type, const rmlui::PipelineConfig& config, NewPipelineCallback&& cb) {
   return find_pipeline_impl(type, config, std::move(cb), PipelinePriority::Blocking, 0);
+}
+#endif
+
+#ifdef AURORA_ENABLE_GXCORE
+template <>
+PipelineRef find_pipeline(ShaderType type, const gxcore::PipelineConfig& config, NewPipelineCallback&& cb) {
+  return find_pipeline_impl(type, config, std::move(cb));
 }
 #endif
 

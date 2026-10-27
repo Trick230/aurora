@@ -244,6 +244,63 @@ static constexpr std::string_view FragZ16 = R"(
 }
 )"sv;
 
+// Depth channel selection mirrors Dolphin TextureConverterShaderGen: the 24-bit
+// depth expands to bytes (hi, mid, lo) and the copy format picks channels.
+
+// GX_CTF_Z4: Upper 4 bits depth -> R (quantized; the depth preamble has no
+// quantize4 helper, so quantize inline: floor(v*16)/15)
+static constexpr std::string_view FragZ4 = R"(
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let v = f32((gx_z24(in.uv) >> 16u) & 0xFFu) / 255.0;
+    let r = floor(min(v, 0.999) * 16.0) / 15.0;
+    return vec4f(r, r, r, r);
+}
+)"sv;
+
+// GX_TF_Z8: Upper 8 bits depth -> R
+static constexpr std::string_view FragZ8 = R"(
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let r = f32((gx_z24(in.uv) >> 16u) & 0xFFu) / 255.0;
+    return vec4f(r, r, r, r);
+}
+)"sv;
+
+// GX_CTF_Z8M: Middle 8 bits depth -> R
+static constexpr std::string_view FragZ8M = R"(
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let r = f32((gx_z24(in.uv) >> 8u) & 0xFFu) / 255.0;
+    return vec4f(r, r, r, r);
+}
+)"sv;
+
+// GX_CTF_Z8L: Low 8 bits depth -> R
+static constexpr std::string_view FragZ8L = R"(
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let r = f32(gx_z24(in.uv) & 0xFFu) / 255.0;
+    return vec4f(r, r, r, r);
+}
+)"sv;
+
+// GX_CTF_Z16L: Low 16 bits depth -> IA8 (mid, low)
+static constexpr std::string_view FragZ16L = R"(
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let z24 = gx_z24(in.uv);
+    let i = f32((z24 >> 8u) & 0xFFu) / 255.0;
+    let a = f32(z24 & 0xFFu) / 255.0;
+    return vec4f(i, i, i, a);
+}
+)"sv;
+
+// GX_TF_Z24X8: Full 24-bit depth -> RGB (hi, mid, lo), alpha 1
+static constexpr std::string_view FragZ24X8 = R"(
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let z24 = gx_z24(in.uv);
+    return vec4f(f32((z24 >> 16u) & 0xFFu) / 255.0,
+                 f32((z24 >> 8u) & 0xFFu) / 255.0,
+                 f32(z24 & 0xFFu) / 255.0, 1.0);
+}
+)"sv;
+
 struct ConvPipeline {
   GXTexFmt fmt;
   std::string_view fragShader;
@@ -270,6 +327,12 @@ static constexpr std::array ConvPipelines{
 
 static constexpr std::array DepthConvPipelines{
     ConvPipeline{GX_TF_Z16, FragZ16, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z16"},
+    ConvPipeline{GX_CTF_Z4, FragZ4, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z4"},
+    ConvPipeline{GX_TF_Z8, FragZ8, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z8"},
+    ConvPipeline{GX_CTF_Z8M, FragZ8M, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z8M"},
+    ConvPipeline{GX_CTF_Z8L, FragZ8L, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z8L"},
+    ConvPipeline{GX_CTF_Z16L, FragZ16L, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z16L"},
+    ConvPipeline{GX_TF_Z24X8, FragZ24X8, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv Z24X8"},
 };
 
 static wgpu::BindGroupLayout g_bindGroupLayout;

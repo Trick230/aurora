@@ -1061,7 +1061,19 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
   }
 
   {
-    const auto& lastStage = config.tevStages[config.tevStageCount - 1];
+    // GXRuntime recomp patch (0006): zero TEV stages is invalid (SDK state
+    // always flushes >=1) but reachable from replayed streams with an
+    // incomplete baseline; the unchecked count-1 index fabricated a wild
+    // pointer. Warn once and read stage 0.
+    if (config.tevStageCount == 0) {
+      static bool warnedZeroTevStages = false;
+      if (!warnedZeroTevStages) {
+        warnedZeroTevStages = true;
+        Log.warn("shader config with tevStageCount=0; treating as 1 stage");
+      }
+    }
+    const u32 lastStageIdx = config.tevStageCount != 0 ? config.tevStageCount - 1 : 0;
+    const auto& lastStage = config.tevStages[lastStageIdx];
     if (lastStage.colorOp.outReg != 0) {
       fragmentFn += fmt::format("\n    prev = vec4f({0}.rgb, prev.a);", regName[lastStage.colorOp.outReg]);
     }

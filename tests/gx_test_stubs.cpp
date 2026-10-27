@@ -122,7 +122,11 @@ namespace aurora::gfx {
 Range push_verts(const uint8_t* data, size_t length, size_t alignment) { return {}; }
 Range push_indices(const uint8_t* data, size_t length, size_t alignment) { return {}; }
 Range push_uniform(const uint8_t* data, size_t length) { return {}; }
-Range push_storage(const uint8_t* data, size_t length) { return {}; }
+size_t g_testLastStoragePushSize = 0;
+Range push_storage(const uint8_t* data, size_t length) {
+  g_testLastStoragePushSize = length;
+  return {.offset = 0, .size = static_cast<uint32_t>(length)};
+}
 
 Vec2<uint32_t> get_render_target_size() noexcept { return {640, 480}; }
 void set_viewport(const Viewport& viewport) noexcept {}

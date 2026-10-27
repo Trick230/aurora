@@ -10,6 +10,7 @@
 #include "../gfx/texture_convert.hpp"
 #include "../gfx/texture_replacement.hpp"
 #include "gx_fmt.hpp"
+#include "recomp.hpp"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -444,6 +445,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
     }
 
     GXTexObj_ obj = g_gxState.loadedTextures[i];
+    recomp::resolve_texture_data(obj);
     auto& textureBind = g_gxState.textures[i];
     if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
         obj.texDataVersion == textureBind.texObj.texDataVersion) {
@@ -455,15 +457,29 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
     const auto copyIt = g_gxState.copyTextures.find(obj.data);
     const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
     if (is_palette_format(obj.format())) {
-      const auto tlutIdx = static_cast<size_t>(obj.tlut);
-      if (tlutIdx < g_gxState.loadedTluts.size()) {
-        const auto& tlut = g_gxState.loadedTluts[tlutIdx];
-        if (tlut.data != nullptr) {
-          if (copyRef != nullptr) {
-            handle = resolve_dynamic_palette_texture(obj, *copyRef, tlut);
-          } else if (obj.has_data()) {
-            handle = resolve_static_palette_texture(obj, tlut);
-          }
+      GXTlutObj_ recompTlut{};
+      const GXTlutObj_* tlut = nullptr;
+      if (obj.texObjId == 0) {
+        if (recomp::resolve_texture_tlut(i, &recompTlut)) {
+          tlut = &recompTlut;
+        }
+      }
+      if (tlut == nullptr) {
+        const auto tlutIdx = static_cast<size_t>(obj.tlut);
+        if (tlutIdx < g_gxState.loadedTluts.size() && g_gxState.loadedTluts[tlutIdx].data != nullptr) {
+          tlut = &g_gxState.loadedTluts[tlutIdx];
+        }
+      }
+      if (tlut == nullptr) {
+        if (recomp::resolve_texture_tlut(i, &recompTlut)) {
+          tlut = &recompTlut;
+        }
+      }
+      if (tlut != nullptr) {
+        if (copyRef != nullptr) {
+          handle = resolve_dynamic_palette_texture(obj, *copyRef, *tlut);
+        } else if (obj.has_data()) {
+          handle = resolve_static_palette_texture(obj, *tlut);
         }
       }
     } else if (copyRef != nullptr) {
@@ -618,6 +634,10 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
     break;
   case GX_CULL_BACK:
     cullMode = wgpu::CullMode::Back;
+    break;
+  case GX_CULL_ALL:
+    // WebGPU has no "Cull Both", map to Front since render() will drop the draw.
+    cullMode = wgpu::CullMode::Front;
     break;
   case GX_CULL_NONE:
     break;
@@ -910,6 +930,10 @@ void shutdown() noexcept {
   s_tlutObjectCaches.clear();
   g_gxState.loadedTextures.fill({});
   g_gxState.loadedTluts.fill({});
+  g_gxState.loadedTmemTluts.fill({});
+  g_gxState.loadedTextureTlutValid.fill(false);
+  g_gxState.loadedTextureTlutTmemOffsets.fill(0);
+  g_gxState.loadedTextureTlutFormats.fill(GX_TL_IA8);
   clear_copy_texture_cache();
 }
 } // namespace aurora::gx

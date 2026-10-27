@@ -173,8 +173,11 @@ private:
 namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = true;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
-inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
-inline constexpr uint64_t IndexBufferSize = 1048576;     // 1mb
+// Vertex/index raised from 3mb/1mb: a full gameplay scene through gxcore --core
+// (Dolphin-ported core, triangle-list expansion) exceeds the menu-scale sizes
+// the live SDK path used. Per-frame staging; costs ~staging_count * delta RAM.
+inline constexpr uint64_t VertexBufferSize = 12582912;   // 12mb
+inline constexpr uint64_t IndexBufferSize = 8388608;     // 8mb
 inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
 
@@ -222,6 +225,7 @@ enum class ShaderType : uint8_t {
   Clear = 0,
   GX = 1,
   Rml = 2,
+  GXCore = 3,
 };
 
 void initialize();

@@ -40,13 +40,19 @@ if (AURORA_ENABLE_GX)
     # FIFO/command processor (encoder + decoder)
     ../lib/gx/fifo.cpp
     ../lib/gx/command_processor.cpp
+    ../lib/gx/recomp.cpp
     # Display list reader/optimizer
     ../lib/gx/attr_fmt.cpp
     ../lib/gx/dl.cpp
     gx_dl_test.cpp
   )
 
+  if (AURORA_RECOMP_TEST_SOURCES)
+    target_sources(gx_fifo_tests PRIVATE ${AURORA_RECOMP_TEST_SOURCES})
+  endif ()
+
   target_include_directories(gx_fifo_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
     ../include
     ../lib
     ../lib/dolphin/gx

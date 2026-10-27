@@ -6,12 +6,14 @@
 #include "gx.hpp"
 #include "gx_fmt.hpp"
 #include "pipeline.hpp"
+#include "recomp.hpp"
 #include "shader_info.hpp"
 #include "../internal.hpp"
 
 #include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -19,6 +21,8 @@
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
+static u32 s_display_list_depth = 0;
+static constexpr u32 MaxDisplayListDepth = 16;
 
 static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
   u16 numIndices = 0;
@@ -253,6 +257,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
       flat[i] = read_f32(data + i * 4, bigEndian);
     }
     g_gxState.stateDirty = true;
+    return true;
   } else if (addr < 0x0F0) {
     // Texture matrices (0x078-0x0EF)
     u32 texBase = addr - 0x078;
@@ -416,27 +421,53 @@ void process(const u8* data, u32 size, bool bigEndian) {
       ZoneScopedN("LOAD_INDX");
       // Indexed XF load: 4 bytes of data
       CHECK(pos + 4 <= size, "indexed XF read overrun");
-      u32 arrayType = GX_POS_MTX_ARRAY + (opcode - (CP_CMD_LOAD_INDX_A / 0x08));
-      u8 srcArrayIdx = data[pos++];
+      const u32 arrayType = GX_POS_MTX_ARRAY + (opcode - CP_CMD_LOAD_INDX_A) / 0x08;
+      const u16 srcArrayIdx = read_u16(data + pos, bigEndian);
+      const u16 addrLen = read_u16(data + pos + 2, bigEndian);
+      pos += 4;
       auto const& array = g_gxState.arrays[arrayType];
-      u8* srcData = ((u8*)array.data) + srcArrayIdx * array.stride;
-      u16 addrLen = read_u16(data + pos, bigEndian);
-      u16 len = (addrLen >> 12) + 1;
-      u16 dstAddr = addrLen & 0x0FFF;
+      const u16 len = (addrLen >> 12) + 1;
+      const u16 dstAddr = addrLen & 0x0FFF;
+      const std::uint64_t srcOffset = static_cast<std::uint64_t>(srcArrayIdx) * array.stride;
+      const std::uint64_t byteSize = static_cast<std::uint64_t>(len) * sizeof(u32);
+      if (array.data == nullptr || srcOffset + byteSize > array.size) {
+        Log.warn("Skipping indexed XF load outside array {} (index={}, stride={}, bytes={}, available={})",
+                 arrayType, srcArrayIdx, array.stride, byteSize, array.size);
+        break;
+      }
+      const u8* srcData = static_cast<const u8*>(array.data) + srcOffset;
       if (!copy_xf_data(dstAddr, srcData, len, bigEndian)) {
 #ifndef NDEBUG
         Log.debug("Unimplemented indexed XF load (opcode 0x{:02X}, dstAddr=%04x)", opcode, dstAddr);
 #endif
       }
-      pos += 4;
       break;
     }
 
     case CP_CMD_CALL_DL: {
       // Call display list: 8 bytes (address + size)
       CHECK(pos + 8 <= size, "call DL read overrun");
-      Log.warn("Ignoring nested GX_CMD_CALL_DL");
+      const u32 address = read_u32(data + pos, bigEndian);
+      const u32 dlSize = read_u32(data + pos + 4, bigEndian);
       pos += 8;
+      if (dlSize == 0) {
+        break;
+      }
+      if (s_display_list_depth >= MaxDisplayListDepth) {
+        Log.warn("Skipping GX_CMD_CALL_DL recursion at depth {} (address=0x{:08X}, size={})", s_display_list_depth,
+                 address, dlSize);
+        break;
+      }
+      const void* dlData = nullptr;
+      u32 available = 0;
+      if (!recomp::resolve_guest_address(address, dlSize, recomp::AddressSpace::Auto,
+                                         recomp::ResourceKind::DisplayList, &dlData, &available)) {
+        Log.warn("Unable to resolve GX_CMD_CALL_DL address=0x{:08X} size={}", address, dlSize);
+        break;
+      }
+      s_display_list_depth++;
+      process(static_cast<const u8*>(dlData), dlSize, bigEndian);
+      s_display_list_depth--;
       break;
     }
 
@@ -489,6 +520,122 @@ void process(const u8* data, u32 size, bool bigEndian) {
 
 // Helper to extract bit fields from a 32-bit register
 inline static u32 bp_get(u32 reg, u32 size, u32 shift) { return reg >> shift & (1u << size) - 1; }
+
+static u32 texture_physical_base(u32 reg) { return (reg & 0x001FFFFFu) << 5; }
+
+static void mark_recomp_texture_metadata(GXTexObj_& slot) {
+  slot.data = nullptr;
+  slot.texObjId = 0;
+  slot.texDataVersion = 0;
+  slot.flags = 0x80;
+}
+
+static GXTexFmt decode_tex_copy_format(u32 value) {
+  const u32 targetPixelFormat = bp_get(value, 4, 3);
+  const u32 realFormat = targetPixelFormat / 2 + (targetPixelFormat & 1u) * 8u;
+  const bool intensity = bp_get(value, 1, 15) != 0;
+
+  switch (realFormat) {
+  case 0x0:
+    return intensity ? GX_TF_I4 : GX_CTF_R4;
+  case 0x1:
+    return GX_TF_I8;
+  case 0x2:
+    return intensity ? GX_TF_IA4 : GX_CTF_RA4;
+  case 0x3:
+    return intensity ? GX_TF_IA8 : GX_CTF_RA8;
+  case 0x4:
+    return GX_TF_RGB565;
+  case 0x5:
+    return GX_TF_RGB5A3;
+  case 0x6:
+    return GX_TF_RGBA8;
+  case 0x7:
+    return GX_CTF_A8;
+  case 0x8:
+    return intensity ? GX_TF_I8 : GX_CTF_R8;
+  case 0x9:
+    return GX_CTF_G8;
+  case 0xA:
+    return GX_CTF_B8;
+  case 0xB:
+    return g_gxState.pixelFmt == GX_PF_Z24 ? GX_TF_Z16 : GX_CTF_RG8;
+  case 0xC:
+    return GX_CTF_GB8;
+  default:
+    return GX_TF_RGBA8;
+  }
+}
+
+static u32 tex_copy_destination_size(GXTexFmt format, u32 width, u32 height) {
+  if (width == 0 || height == 0 || width > UINT16_MAX || height > UINT16_MAX) {
+    return 0;
+  }
+  return GXGetTexBufferSize(static_cast<u16>(width), static_cast<u16>(height), format, GX_FALSE, 0);
+}
+
+static void update_tex_copy_state_from_trigger(u32 value) {
+  g_gxState.texCopyFmt = decode_tex_copy_format(value);
+
+  u32 width = static_cast<u32>(std::max(g_gxState.texCopySrc.width, 1));
+  u32 height = static_cast<u32>(std::max(g_gxState.texCopySrc.height, 1));
+  if (bp_get(value, 1, 9) != 0) {
+    width = std::max((width + 1u) / 2u, 1u);
+    height = std::max((height + 1u) / 2u, 1u);
+  }
+  g_gxState.texCopyDstWidth = width;
+  g_gxState.texCopyDstHeight = height;
+  g_gxState.texCopyDstWide = true;
+}
+
+static void resolve_tex_copy_destination_from_bp(u32 triggerValue) {
+  if (g_gxState.texCopyDestPhysical == UINT32_MAX) {
+    return;
+  }
+  update_tex_copy_state_from_trigger(triggerValue);
+
+  u32 byteSize = tex_copy_destination_size(g_gxState.texCopyFmt, g_gxState.texCopyDstWidth,
+                                           g_gxState.texCopyDstHeight);
+  if (byteSize == 0) {
+    byteSize = 1;
+  }
+
+  const void* destData = nullptr;
+  u32 available = 0;
+  if (recomp::resolve_guest_address(g_gxState.texCopyDestPhysical, byteSize, recomp::AddressSpace::Physical,
+                                     recomp::ResourceKind::CopyDestination, &destData, &available)) {
+    g_gxState.texCopyDest = destData;
+  }
+}
+
+static void resolve_tlut_load_from_bp(u32 value) {
+  const u32 tmemOffset = bp_get(value, 10, 0);
+  const u32 lineCount = bp_get(value, 11, 10);
+  if (tmemOffset >= MaxTmemTlutOffsets || lineCount == 0) {
+    return;
+  }
+
+  const u32 byteSize = lineCount * 32u;
+  const u32 physicalBase = texture_physical_base(g_gxState.bpRegCache[0x64]);
+  const void* tlutData = nullptr;
+  u32 available = 0;
+  if (!recomp::resolve_guest_address(physicalBase, byteSize, recomp::AddressSpace::Physical,
+                                     recomp::ResourceKind::Tlut, &tlutData, &available)) {
+    return;
+  }
+
+  auto& slot = g_gxState.loadedTmemTluts[tmemOffset];
+  slot.tlut = value;
+  slot.loadTlut0 = g_gxState.bpRegCache[0x64];
+  slot.numEntries = static_cast<u16>(byteSize / sizeof(u16));
+  slot.data = tlutData;
+  slot.tlutObjId = 0x80000000u | tmemOffset;
+  slot.tlutDataVersion = slot.tlutDataVersion + 1u;
+  if (slot.tlutDataVersion == 0) {
+    slot.tlutDataVersion = 1;
+  }
+  slot.set_no_cache(false);
+}
 
 // BP register handler - decodes BP (RAS/pixel engine) register writes and updates g_gxState
 static void handle_bp(u32 value, bool bigEndian) {
@@ -787,13 +934,38 @@ static void handle_bp(u32 value, bool bigEndian) {
     break;
   }
 
+  // Texture/display copy source/destination registers
+  case 0x49: {
+    g_gxState.texCopySrc.x = static_cast<int32_t>(bp_get(value, 10, 0));
+    g_gxState.texCopySrc.y = static_cast<int32_t>(bp_get(value, 10, 10));
+    break;
+  }
+  case 0x4A: {
+    g_gxState.texCopySrc.width = static_cast<int32_t>(bp_get(value, 10, 0) + 1);
+    g_gxState.texCopySrc.height = static_cast<int32_t>(bp_get(value, 10, 10) + 1);
+    break;
+  }
+  case 0x4B: {
+    g_gxState.texCopyDestPhysical = texture_physical_base(value);
+    break;
+  }
+  case 0x4D:
+    // Destination stride is already reflected in the game's memory layout. Aurora copy textures key on the resolved
+    // destination pointer, dimensions, and format.
+    break;
+
   // Texture copy
   case 0x52: {
     const bool clear = bp_get(value, 1, 11) != 0;
     if (bp_get(value, 1, 14) != 0) {
       Log.warn("STUB: display copy is not implemented");
     } else {
-      copy_tex(g_gxState.texCopyDest, clear);
+      resolve_tex_copy_destination_from_bp(value);
+      if (g_gxState.texCopyDest != nullptr) {
+        copy_tex(g_gxState.texCopyDest, clear);
+      } else {
+        Log.warn("Skipping GXCopyTex with unresolved destination");
+      }
     }
     break;
   }
@@ -802,6 +974,7 @@ static void handle_bp(u32 value, bool bigEndian) {
   case 0x64:
     break;
   case 0x65: {
+    resolve_tlut_load_from_bp(value);
     const auto idx = bp_get(value, 10, 0);
     if (idx < MaxTluts) {
       auto& slot = g_gxState.loadedTluts[idx];
@@ -1111,12 +1284,16 @@ static void handle_bp(u32 value, bool bigEndian) {
         slot.mWidth = 0;
         slot.mHeight = 0;
         slot.mFormat = gfx::InvalidTextureFormat;
+        mark_recomp_texture_metadata(slot);
         break;
       case TexBpRegMapping::Kind::Image3:
         slot.image3 = value;
+        mark_recomp_texture_metadata(slot);
         break;
       case TexBpRegMapping::Kind::Tlut:
-        // TLUT region's TMEM offset
+        g_gxState.loadedTextureTlutValid[mapping->texMapId] = true;
+        g_gxState.loadedTextureTlutTmemOffsets[mapping->texMapId] = static_cast<u16>(bp_get(value, 10, 0));
+        g_gxState.loadedTextureTlutFormats[mapping->texMapId] = static_cast<GXTlutFmt>(bp_get(value, 2, 10));
         break;
       case TexBpRegMapping::Kind::Image1:
       case TexBpRegMapping::Kind::Image2:
@@ -1254,7 +1431,24 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     }
     // Array base addresses (0xA0-0xAF)
     else if (addr >= 0xA0 && addr <= 0xAF) {
-      Log.error("CP_REG_ARRAYBASE_ID is not supported on Aurora. Use GX_AURORA_LOAD_ARRAYBASE instead.");
+      u32 attrIdx = addr - 0xA0 + GX_VA_POS;
+      if (attrIdx < GX_VA_MAX_ATTR) {
+        const void* arrayData = nullptr;
+        u32 available = 0;
+        if (recomp::resolve_guest_address(value, 1, recomp::AddressSpace::Physical, recomp::ResourceKind::VertexArray,
+                                          &arrayData, &available)) {
+          auto& array = g_gxState.arrays[attrIdx];
+          if (array.data != arrayData || array.size != available || array.le) {
+            array.data = arrayData;
+            array.size = available;
+            array.le = false;
+            array.cachedRange = {};
+            g_gxState.stateDirty = true;
+          }
+        } else {
+          Log.error("Unable to resolve CP_REG_ARRAYBASE_ID attr={} physical=0x{:08X}", attrIdx, value);
+        }
+      }
     }
     // Array strides (0xB0-0xBF)
     else if (addr >= 0xB0 && addr <= 0xBF) {
@@ -1347,13 +1541,16 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           u32 lightsLo = bp_get(val, 4, 2);
           chan.ambSrc = static_cast<GXColorSrc>(bp_get(val, 1, 6));
           chan.diffFn = static_cast<GXDiffuseFn>(bp_get(val, 2, 7));
-          // Encoding: bit 9 = (attnFn != GX_AF_SPEC), bit 10 = (attnFn != GX_AF_NONE)
+          // Encoding (SDK GXSetChanCtrl): bit 9 = (attnFn != GX_AF_NONE),
+          // bit 10 = (attnFn != GX_AF_SPEC). The raw 2-bit field matches
+          // Dolphin XFMemory AttenuationFunc {0:None,1:Spec,2:Dir,3:Spot},
+          // where Dir also means "no attenuation".
           bool bit9 = bp_get(val, 1, 9) != 0;
           bool bit10 = bp_get(val, 1, 10) != 0;
           u32 lightsHi = bp_get(val, 4, 11);
-          if (!bit10) {
+          if (!bit9) {
             chan.attnFn = GX_AF_NONE;
-          } else if (!bit9) {
+          } else if (!bit10) {
             chan.attnFn = GX_AF_SPEC;
           } else {
             chan.attnFn = GX_AF_SPOT;
@@ -1550,14 +1747,73 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
   return vtxSize;
 }
 
-static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange);
+static bool has_indexed_arrays() {
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if (g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void calculate_indexed_array_sizes(GXVtxFmt fmt, u16 vtxCount, const u8* vertices, bool bigEndian,
+                                          std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
+  arraySizes.fill(0);
+  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+  const u8* cursor = vertices;
+
+  for (u16 v = 0; v < vtxCount; ++v) {
+    for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+      const auto attr = static_cast<GXAttr>(i);
+      switch (g_gxState.vtxDesc[i]) {
+      case GX_NONE:
+        break;
+      case GX_DIRECT:
+        cursor += comp_type_size(attr, vtxFmt.attrs[i].type) * comp_cnt_count(attr, vtxFmt.attrs[i].cnt);
+        break;
+      case GX_INDEX8: {
+        const u32 count = (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3u : 1u;
+        for (u32 n = 0; n < count; ++n) {
+          const u32 index = *cursor++;
+          if (i >= GX_VA_POS && i <= GX_VA_TEX7) {
+            const auto& array = g_gxState.arrays[i];
+            const u32 required = (index + 1u) * array.stride;
+            if (required > arraySizes[i]) {
+              arraySizes[i] = required;
+            }
+          }
+        }
+        break;
+      }
+      case GX_INDEX16: {
+        const u32 count = (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3u : 1u;
+        for (u32 n = 0; n < count; ++n) {
+          const u32 index = read_u16(cursor, bigEndian);
+          cursor += 2;
+          if (i >= GX_VA_POS && i <= GX_VA_TEX7) {
+            const auto& array = g_gxState.arrays[i];
+            const u32 required = (index + 1u) * array.stride;
+            if (required > arraySizes[i]) {
+              arraySizes[i] = required;
+            }
+          }
+        }
+        break;
+      }
+      }
+    }
+  }
+}
+
+static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
+                                 const std::array<u32, GX_VA_MAX_ATTR>& arraySizes);
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
-                         u32 numIndices);
+                         u32 numIndices, const std::array<u32, GX_VA_MAX_ATTR>& arraySizes);
 
 // Draw command handler - parses vertices inline and caches results
 static ByteBuffer handle_draw_idx_buf;
 
-static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
+static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size, bool bigEndian) {
   ZoneScoped;
   u32 vtxSize;
   if (g_gxState.lastVtxFmt == fmt)
@@ -1569,7 +1825,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   if (pos + totalVtxBytes > size)
     UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
 
-  auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
+  std::array<u32, GX_VA_MAX_ATTR> arraySizes;
+  calculate_indexed_array_sizes(fmt, vtxCount, data + pos, bigEndian, arraySizes);
+
+  auto* lastDraw = !g_gxState.stateDirty && !has_indexed_arrays() ? gfx::get_last_draw_command<DrawData>() : nullptr;
   const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
                         lastDraw->instanceCount == 1;
 
@@ -1612,7 +1871,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     return;
   }
 
-  handle_draw_unmerged(prim, fmt, vtxCount, vertRange);
+  handle_draw_unmerged(prim, fmt, vtxCount, vertRange, arraySizes);
 }
 
 static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
@@ -1623,12 +1882,13 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   u16 vtxCount = read_u16(data + pos, bigEndian);
   pos += 2;
 
-  draw_prim(prim, fmt, vtxCount, data, pos, size);
+  draw_prim(prim, fmt, vtxCount, data, pos, size, bigEndian);
 }
 
 static ByteBuffer handle_draw_unmerged_idxBuf;
 
-static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange) {
+static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
+                                 const std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
   ZoneScoped;
   u32 numIndices = 0;
   gfx::Range idxRange;
@@ -1641,11 +1901,11 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
     realBuf.clear();
   }
 
-  push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices);
+  push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices, arraySizes);
 }
 
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
-                         u32 numIndices) {
+                         u32 numIndices, const std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
   // Build pipeline, bind groups, and push draw command
   BindGroupRanges ranges{};
   for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
@@ -1653,10 +1913,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       continue;
     }
     auto& array = g_gxState.arrays[i];
-    if (array.cachedRange.size > 0) {
+    const u32 requiredSize = std::min(array.size, arraySizes[i]);
+    if (array.cachedRange.size >= requiredSize && array.cachedRange.size > 0) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
     } else {
-      const auto range = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+      const auto range = gfx::push_storage(static_cast<const uint8_t*>(array.data), requiredSize);
       ranges.vaRanges[i - GX_VA_POS] = range;
       array.cachedRange = range;
     }
@@ -1687,6 +1948,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .instanceCount = instanceCount,
       .bindGroups = bindGroups,
       .dstAlpha = g_gxState.dstAlpha,
+      .cullMode = g_gxState.cullMode,
   });
 }
 
@@ -1840,6 +2102,9 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pos += 4;
     g_gxState.texCopyFmt = static_cast<GXTexFmt>(read_u32(data + pos, bigEndian));
     pos += 4;
+    const bool mipmap = data[pos] != 0;
+    pos += 1;
+    (void)mipmap;
     g_gxState.texCopyDstWide = true;
   } else if (subCmd == GX_AURORA_LOAD_COPY_DEST) {
     CHECK(pos + 8 <= size, "GX_AURORA_LOAD_COPY_DEST read overrun");
@@ -1887,7 +2152,7 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
              "GX_AURORA_DRAW_SIZED: {} bytes is not a whole number of size-{} vertices", byteLen, vtxSize);
       u32 vtxCount = byteLen / vtxSize;
       ASSERT(vtxCount <= 0xFFFF, "GX_AURORA_DRAW_SIZED: too many vertices ({})", vtxCount);
-      draw_prim(prim, fmt, static_cast<u16>(vtxCount), data, pos, size);
+      draw_prim(prim, fmt, static_cast<u16>(vtxCount), data, pos, size, bigEndian);
     }
   } else if (subCmd == GX_AURORA_DRAW_INDEXED) {
     ZoneScopedN("DRAW_INDEXED");
@@ -1915,10 +2180,12 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     }
     const u32 totalVtxBytes = vtxCount * vtxSize;
     CHECK(pos + totalVtxBytes <= size, "GX_AURORA_DRAW_INDEXED vertex data overrun");
+    std::array<u32, GX_VA_MAX_ATTR> arraySizes;
+    calculate_indexed_array_sizes(fmt, vtxCount, data + pos, bigEndian, arraySizes);
     const gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, 4);
     pos += totalVtxBytes;
     if (indexCount != 0) {
-      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
+      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount, arraySizes);
     }
   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
     auto label = read_string(data, pos, size, bigEndian);

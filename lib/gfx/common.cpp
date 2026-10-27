@@ -2,10 +2,14 @@
 
 #include "clear.hpp"
 #include "depth_peek.hpp"
+#include "efb_readback.hpp"
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
 #include "../webgpu/gpu_prof.hpp"
 #include "../gx/pipeline.hpp"
+#ifdef AURORA_ENABLE_GXCORE
+#include "gxcore_draw.hpp"
+#endif
 #ifdef AURORA_ENABLE_RMLUI
 #include "../rmlui/pipeline.hpp"
 #endif
@@ -73,6 +77,9 @@ struct ShaderDrawCommand {
     gx::DrawData gx;
 #ifdef AURORA_ENABLE_RMLUI
     rmlui::DrawData rml;
+#endif
+#ifdef AURORA_ENABLE_GXCORE
+    gxcore::DrawData gxcore;
 #endif
   };
 };
@@ -900,6 +907,20 @@ void push_draw_command(rmlui::DrawData data) {
 }
 #endif
 
+#ifdef AURORA_ENABLE_GXCORE
+template <>
+void push_draw_command(gxcore::DrawData data) {
+  push_draw_command(
+      ShaderDrawCommand{.type = ShaderType::GXCore, .gxcore = data});
+}
+
+template <>
+PipelineRef pipeline_ref(const gxcore::PipelineConfig& config) {
+  return find_pipeline(ShaderType::GXCore, config,
+                       [=] { return gxcore::create_pipeline(config); });
+}
+#endif
+
 template <>
 PipelineRef pipeline_ref(const gx::PipelineConfig& config) {
   return find_pipeline(ShaderType::GX, config, [=] { return create_pipeline(config); });
@@ -1508,7 +1529,10 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
   }
 }
 
-void after_submit() noexcept { depth_peek::after_submit(); }
+void after_submit() noexcept {
+  depth_peek::after_submit();
+  efb_readback::after_submit();
+}
 
 void gpu_synchronize() { render_worker::synchronize(); }
 
@@ -1600,6 +1624,11 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
 #ifdef AURORA_ENABLE_RMLUI
       case ShaderType::Rml:
         rmlui::render(draw.rml, pass);
+        break;
+#endif
+#ifdef AURORA_ENABLE_GXCORE
+      case ShaderType::GXCore:
+        gxcore::render(draw.gxcore, pass);
         break;
 #endif
       }
@@ -1767,4 +1796,12 @@ void pop_debug_group() {
 }
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::g_stats; }
+
+void aurora_request_framebuffer_readback() { aurora::gfx::efb_readback::request(); }
+
+bool aurora_take_framebuffer_readback(const uint8_t** rgba, uint32_t* width, uint32_t* height) {
+  return aurora::gfx::efb_readback::take(rgba, width, height);
+}
+
+void aurora_pump_framebuffer_readback() { aurora::gfx::enqueue_process_events(); }
 float aurora_get_fps() { return aurora::gfx::calculate_fps(); }
