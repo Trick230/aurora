@@ -213,7 +213,9 @@ const AuroraEvent* update() noexcept {
   ZoneScoped;
   if (g_initialFrame) {
     g_initialFrame = false;
-    input::initialize();
+    if (!g_config.disableInput) {
+      input::initialize();
+    }
   }
   return window::poll_events();
 }

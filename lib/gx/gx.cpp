@@ -85,7 +85,76 @@ absl::flat_hash_map<u32, CachedTextureEntry> s_textureObjectCaches;
 absl::flat_hash_map<u32, TlutObjectCache> s_tlutObjectCaches;
 std::atomic_bool s_staticTextureCacheClearPending = false;
 
+// Retail FIFO textures (recomp::resolve_texture_data) have no texture object
+// identity. Key them by what the hardware sees and revalidate the contents by
+// hash at most once per frame, so animated data still re-uploads.
+struct RetailTextureKey {
+  const void* data = nullptr;
+  const void* tlutData = nullptr;
+  u32 width = 0;
+  u32 height = 0;
+  u32 format = 0;
+  u32 mipCount = 0;
+  u32 tlutFormat = 0;
+  u32 tlutEntries = 0;
+
+  bool operator==(const RetailTextureKey& rhs) const = default;
+  template <typename H>
+  friend H AbslHashValue(H h, const RetailTextureKey& key) {
+    return H::combine(std::move(h), key.data, key.tlutData, key.width, key.height, key.format, key.mipCount,
+                      key.tlutFormat, key.tlutEntries);
+  }
+};
+
+struct RetailTextureEntry {
+  gfx::TextureHandle handle;
+  HashType hash = 0;
+  u32 lastFrame = 0;
+};
+
+constexpr u32 RetailTextureMaxIdleFrames = 600;
+absl::flat_hash_map<RetailTextureKey, RetailTextureEntry> s_retailTextures;
+u32 s_retailTextureSweepFrame = 0;
+
+bool is_retail_texture(const GXTexObj_& obj) noexcept { return obj.texObjId == 0 && obj.no_cache(); }
+
+template <typename Create>
+gfx::TextureHandle resolve_retail_texture(const GXTexObj_& obj, const GXTlutObj_* tlut, Create&& create) {
+  const u32 frame = gfx::current_frame();
+  if (frame - s_retailTextureSweepFrame >= RetailTextureMaxIdleFrames) {
+    s_retailTextureSweepFrame = frame;
+    absl::erase_if(s_retailTextures,
+                   [frame](const auto& it) { return frame - it.second.lastFrame > RetailTextureMaxIdleFrames; });
+  }
+
+  const RetailTextureKey key{
+      .data = obj.data,
+      .tlutData = tlut != nullptr ? tlut->data : nullptr,
+      .width = obj.width(),
+      .height = obj.height(),
+      .format = obj.format(),
+      .mipCount = obj.mip_count(),
+      .tlutFormat = tlut != nullptr ? static_cast<u32>(tlut->format) : 0,
+      .tlutEntries = tlut != nullptr ? tlut->numEntries : 0u,
+  };
+  auto& entry = s_retailTextures[key];
+  if (entry.handle && entry.lastFrame == frame) {
+    return entry.handle;
+  }
+  HashType hash = xxh3_hash_s(obj.data, recomp::texture_byte_size(obj));
+  if (tlut != nullptr) {
+    hash = xxh3_hash_s(tlut->data, static_cast<size_t>(tlut->numEntries) * sizeof(u16), hash);
+  }
+  if (!entry.handle || entry.hash != hash) {
+    entry.handle = create();
+    entry.hash = hash;
+  }
+  entry.lastFrame = frame;
+  return entry.handle;
+}
+
 void do_clear_static_texture_cache() noexcept {
+  s_retailTextures.clear();
   s_textureObjectCaches.clear();
   for (auto& [_, cache] : s_tlutObjectCaches) {
     cache.staticTextureUsers.clear();
@@ -173,19 +242,23 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
     }
   }
 
-  gfx::TextureHandle handle;
-  if (const auto replacement = gfx::texture_replacement::find_replacement(obj); replacement.has_value()) {
-    handle = *replacement;
-  } else {
+  const auto create = [&obj] {
+    if (const auto replacement = gfx::texture_replacement::find_replacement(obj); replacement.has_value()) {
+      return *replacement;
+    }
 #if DEBUG
     const auto name = gfx::texture_replacement::build_texture_replacement_name(obj);
     const auto nameStr = name.c_str();
 #else
     const auto nameStr = "GX Static Texture";
 #endif
-    handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
-                                        {static_cast<const uint8_t*>(obj.data), UINT32_MAX}, false, nameStr);
+    return gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
+                                      {static_cast<const uint8_t*>(obj.data), UINT32_MAX}, false, nameStr);
+  };
+  if (is_retail_texture(obj)) {
+    return resolve_retail_texture(obj, nullptr, create);
   }
+  gfx::TextureHandle handle = create();
   if (!obj.no_cache()) {
     store_cached_texture(obj, handle);
   }
@@ -208,21 +281,26 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
     }
   }
 
-  gfx::TextureHandle handle;
-  if (const auto replacement = gfx::texture_replacement::find_replacement(obj, tlut); replacement.has_value()) {
-    handle = *replacement;
-  } else {
+  const auto create = [&obj, &tlut]() -> gfx::TextureHandle {
+    if (const auto replacement = gfx::texture_replacement::find_replacement(obj, tlut); replacement.has_value()) {
+      return *replacement;
+    }
     auto converted = gfx::convert_texture_palette(
         obj.format(), obj.width(), obj.height(), obj.mip_count(), {static_cast<const u8*>(obj.data), UINT32_MAX},
         tlut.format, tlut.numEntries, {static_cast<const u8*>(tlut.data), static_cast<size_t>(tlut.numEntries) * 2});
     if (converted.data.empty()) {
       return {};
     }
-    handle =
+    auto handle =
         gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), GX_TF_RGBA8_PC,
                                    {converted.data.data(), converted.data.size()}, false, "GX Static Palette Texture");
     handle->hasArbitraryMips = converted.hasArbitraryMips;
+    return handle;
+  };
+  if (is_retail_texture(obj)) {
+    return resolve_retail_texture(obj, &tlut, create);
   }
+  gfx::TextureHandle handle = create();
   if (!obj.no_cache() && !tlut.no_cache()) {
     store_cached_texture(obj, handle, tlut.tlutObjId, tlut.tlutDataVersion);
   }
@@ -778,6 +856,10 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   }
   for (u8 i = 0; i < g_gxState.numTexGens; ++i) {
     config.shaderConfig.tcgs[i] = g_gxState.tcgs[i];
+    if (!g_gxState.dualTexTrans) {
+      config.shaderConfig.tcgs[i].postMtx = GX_PTIDENTITY;
+      config.shaderConfig.tcgs[i].normalize = false;
+    }
   }
   if (g_gxState.alphaCompare) {
     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;

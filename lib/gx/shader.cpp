@@ -123,15 +123,13 @@ static std::string color_arg_reg(GXTevColorArg arg, size_t stageIdx, const Shade
   case GX_CC_A2:
     return "vec3f(tevreg2.a)";
   case GX_CC_TEXC: {
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", stageIdx);
-    CHECK(stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
+    CHECK(stage.texMapId == GX_TEXMAP_NULL || stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
           underlying(stage.texMapId), stageIdx);
     const auto& swap = config.tevSwapTable[stage.tevSwapTex];
     return fmt::format("sampled{}.{}{}{}", stageIdx, chan_comp(swap.red), chan_comp(swap.green), chan_comp(swap.blue));
   }
   case GX_CC_TEXA: {
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", stageIdx);
-    CHECK(stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
+    CHECK(stage.texMapId == GX_TEXMAP_NULL || stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
           underlying(stage.texMapId), stageIdx);
     const auto& swap = config.tevSwapTable[stage.tevSwapTex];
     return fmt::format("vec3f(sampled{}.{})", stageIdx, chan_comp(swap.alpha));
@@ -251,8 +249,7 @@ static std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const Shade
   case GX_CA_A2:
     return "tevreg2.a";
   case GX_CA_TEXA: {
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", stageIdx);
-    CHECK(stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
+    CHECK(stage.texMapId == GX_TEXMAP_NULL || stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
           underlying(stage.texMapId), stageIdx);
     const auto& swap = config.tevSwapTable[stage.tevSwapTex];
     return fmt::format("sampled{}.{}", stageIdx, chan_comp(swap.alpha));
@@ -639,17 +636,17 @@ auto attr_address(const AttrConfig& mapping, GXAttr attr, std::string_view vidx,
     -> AttrAddress {
   const u32 dlOffset = mapping.offset + dlExtra;
   if (mapping.attrType == GX_INDEX8) {
-    return {fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&vbuf, ubuf.vtx_start + {} * {}u + {}u) * {}u + {}u",
+    return {fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&vbuf, vtx_start + {} * {}u + {}u) * {}u + {}u",
                         attr - GX_VA_POS, vidx, vtxStride, dlOffset, mapping.stride, within),
             "abuf"sv, mapping.le};
   }
   if (mapping.attrType == GX_INDEX16) {
     return {
-        fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&vbuf, ubuf.vtx_start + {} * {}u + {}u, false) * {}u + {}u",
+        fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&vbuf, vtx_start + {} * {}u + {}u, false) * {}u + {}u",
                     attr - GX_VA_POS, vidx, vtxStride, dlOffset, mapping.stride, within),
         "abuf"sv, mapping.le};
   }
-  return {fmt::format("ubuf.vtx_start + {} * {}u + {}u", vidx, vtxStride, dlOffset + within), "vbuf"sv, false};
+  return {fmt::format("vtx_start + {} * {}u + {}u", vidx, vtxStride, dlOffset + within), "vbuf"sv, false};
 }
 
 auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -> std::string {
@@ -916,6 +913,12 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
 
   // Load points for line/point expansion
   std::string_view vidxAttr = "vidx"sv;
+  if (config.lineMode == 0) {
+    // Single-instance draws carry their vertex byte offset as firstInstance.
+    vtxInAttrs += ",\n    @builtin(instance_index) vtx_start: u32";
+  } else {
+    vtxXfrAttrsPre += "\n    let vtx_start = ubuf.vtx_start;";
+  }
   if (config.lineMode != 0) {
     vtxInAttrs += ",\n    @builtin(instance_index) iidx: u32";
     uniBufAttrs +=
@@ -1019,10 +1022,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
         "\n    let clip_base = select(clip_a, clip_b, use_b);"
         "\n    out.pos = vec4f(clip_base.xy + offset_ndc * clip_base.w, clip_base.zw);";
   }
+  // GX clips to -w <= z <= 0. Retail 2D passes put quads exactly on the near
+  // plane (s16 z = -1 with the SDK ortho matrix), where rounding in the
+  // projection drops them; pull z in by an ulp-sized margin as Dolphin does.
   if constexpr (UseReversedZ) {
-    vtxXfrAttrsPre += "\n    out.pos.z = -out.pos.z;";
+    vtxXfrAttrsPre += "\n    out.pos.z = -out.pos.z * (1.0 - 1e-7);";
   } else {
-    vtxXfrAttrsPre += "\n    out.pos.z += out.pos.w;";
+    vtxXfrAttrsPre += "\n    out.pos.z = out.pos.z * (1.0 - 1e-7) + out.pos.w;";
   }
   vtxXfrAttrsPre += fmt::format(
       "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
@@ -1198,10 +1204,11 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, vtx_attr(config, GX_VA_POS));
     } else if (tcg.src == GX_TG_NRM) {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, vtx_attr(config, GX_VA_NRM));
-    } else if (tcg.src == GX_TG_COLOR0) {
-      vtxXfrAttrs += fmt::format("\n    var tc{} = {};", i, vtx_attr(config, GX_VA_CLR0));
-    } else if (tcg.src == GX_TG_COLOR1) {
-      vtxXfrAttrs += fmt::format("\n    var tc{} = {};", i, vtx_attr(config, GX_VA_CLR1));
+    } else if (tcg.src == GX_TG_COLOR0 || tcg.src == GX_TG_COLOR1) {
+      // XF texgen sees the channel after lighting, not the vertex color
+      // (Dolphin does the same); shader_info marks the channel as computed.
+      static_assert(!UsePerPixelLighting, "color texgen needs per-vertex channel colors");
+      vtxXfrAttrs += fmt::format("\n    var tc{} = out.cc{};", i, tcg.src - GX_TG_COLOR0);
     } else if (tcg.src == GX_TG_BINRM) {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, nbt_slice_local(NbtSlice::B));
     } else if (tcg.src == GX_TG_TANGENT) {
@@ -1472,7 +1479,11 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       continue;
     }
 
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", i);
+    if (stage.texMapId == GX_TEXMAP_NULL) {
+      // Tex order disabled: the hardware feeds TEV white, as Dolphin does.
+      fragmentFnPre += fmt::format("\n    let sampled{} = vec4f(1.0);", i);
+      continue;
+    }
     CHECK(stage.texCoordId != GX_TEXCOORD_NULL, "unmapped texcoord for stage {}", i);
     if (uvIn.empty()) {
       // No indirect texturing

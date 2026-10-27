@@ -6,7 +6,6 @@
 #include <windows.h>
 #include <combaseapi.h>
 #include <Wbemidl.h>
-#include <comutil.h>
 #include <dxgi.h>
 #include <wrl/client.h>
 
@@ -130,7 +129,14 @@ std::string GetCpuModel() {
   // Connect to the root\cimv2 namespace with
   // the current user and obtain pointer pSvc
   // to make IWbemServices calls.
-  hres = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), // Object path of WMI namespace
+  // Plain BSTRs (not comutil's _bstr_t) so MinGW builds need no comsuppw.
+  struct Bstr {
+    BSTR str;
+    explicit Bstr(const wchar_t* text) : str(SysAllocString(text)) {}
+    ~Bstr() { SysFreeString(str); }
+  };
+  const Bstr nameSpace{L"ROOT\\CIMV2"};
+  hres = pLoc->ConnectServer(nameSpace.str,           // Object path of WMI namespace
                              NULL,                    // User name. NULL = current user
                              NULL,                    // User password. NULL = current
                              0,                       // Locale. NULL indicates current
@@ -160,7 +166,9 @@ std::string GetCpuModel() {
   }
 
   ComPtr<IEnumWbemClassObject> pEnumerator;
-  hres = pSvc->ExecQuery(bstr_t(L"WQL"), bstr_t(L"select Name from Win32_Processor"),
+  const Bstr language{L"WQL"};
+  const Bstr query{L"select Name from Win32_Processor"};
+  hres = pSvc->ExecQuery(language.str, query.str,
                          WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
   if (FAILED(hres)) {
     Log.error("ExecQuery failed");

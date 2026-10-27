@@ -93,6 +93,9 @@ typedef struct {
   bool pauseOnFocusLost;
   bool allowTextureDumps;
   bool allowCpuAdapter;
+  // The host reads controllers itself: leave SDL's joystick, gamepad, haptic
+  // and sensor subsystems uninitialized, so event polling never scans devices.
+  bool disableInput;
   int32_t windowPosX;
   int32_t windowPosY;
   uint32_t windowWidth;

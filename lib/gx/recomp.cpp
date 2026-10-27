@@ -11,7 +11,7 @@ ResolveGuestAddressFn g_resolve_guest_address = nullptr;
 void* g_resolve_guest_user = nullptr;
 
 std::uint32_t texture_physical_base(std::uint32_t reg) noexcept {
-  return (reg & 0x001FFFFFu) << 5;
+  return (reg & 0x00FFFFFFu) << 5;  // 24-bit: reaches Wii MEM2
 }
 
 bool retail_texture_has_mips(const GXTexObj_& obj) noexcept {
@@ -26,12 +26,14 @@ bool retail_texture_has_mips(const GXTexObj_& obj) noexcept {
   }
 }
 
-std::uint32_t max_lod_for_buffer_size(const GXTexObj_& obj) noexcept {
+// GXGetTexBufferSize takes a level count; mode1 holds the highest LOD index,
+// so a mip-filtered texture clamped to LOD 0 still has its base level.
+std::uint32_t mip_levels_for_buffer_size(const GXTexObj_& obj) noexcept {
   const auto lod = obj.max_lod();
   if (!std::isfinite(lod) || lod <= 0.f) {
-    return 0;
+    return 1;
   }
-  return std::min<std::uint32_t>(static_cast<std::uint32_t>(lod), 255u);
+  return std::min<std::uint32_t>(static_cast<std::uint32_t>(lod) + 1, 11u);
 }
 } // namespace
 
@@ -67,7 +69,7 @@ std::uint32_t texture_byte_size(const GXTexObj_& obj) noexcept {
   }
   const bool mips = obj.has_mips() || retail_texture_has_mips(obj);
   return GXGetTexBufferSize(static_cast<u16>(width), static_cast<u16>(height), obj.format(), mips ? GX_TRUE : GX_FALSE,
-                            static_cast<u8>(mips ? max_lod_for_buffer_size(obj) : 0));
+                            static_cast<u8>(mips ? mip_levels_for_buffer_size(obj) : 0));
 }
 
 bool resolve_texture_data(GXTexObj_& obj) noexcept {

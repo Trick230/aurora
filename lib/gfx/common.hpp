@@ -95,6 +95,8 @@ public:
   [[nodiscard]] const uint8_t* data() const noexcept { return m_data; }
   [[nodiscard]] size_t size() const noexcept { return m_length; }
   [[nodiscard]] bool empty() const noexcept { return m_length == 0; }
+  // Bytes that fit before a mapped (non-owned) buffer would abort; owned ones grow.
+  [[nodiscard]] size_t remaining() const noexcept { return m_owned ? SIZE_MAX : m_capacity - m_length; }
 
   void append(const void* data, size_t size) {
     resize(m_length + size, false);
@@ -172,18 +174,22 @@ private:
 
 namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = true;
-inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
+// GX draws share identical uniform blocks within a frame, so 8mb holds
+// several times a heavy retail frame; the space went to vertex arrays,
+// which a NiGHTS level frame fills past 8mb.
+inline constexpr uint64_t UniformBufferSize = 8388608;   // 8mb
 // Vertex/index raised from 3mb/1mb: a full gameplay scene through gxcore --core
 // (Dolphin-ported core, triangle-list expansion) exceeds the menu-scale sizes
 // the live SDK path used. Per-frame staging; costs ~staging_count * delta RAM.
 inline constexpr uint64_t VertexBufferSize = 12582912;   // 12mb
 inline constexpr uint64_t IndexBufferSize = 8388608;     // 8mb
-inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
+inline constexpr uint64_t StorageBufferSize = 25165824;  // 24mb
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
 
 extern AuroraStats g_stats;
 extern uint32_t g_drawCallCount;
 extern uint32_t g_mergedDrawCallCount;
+extern uint32_t g_droppedDrawCallCount;
 extern wgpu::Buffer g_vertexBuffer;
 extern wgpu::Buffer g_uniformBuffer;
 extern wgpu::Buffer g_indexBuffer;
@@ -295,6 +301,9 @@ static Range push_uniform(const T& data) {
   return push_uniform(reinterpret_cast<const uint8_t*>(&data), sizeof(T));
 }
 Range push_storage(const uint8_t* data, size_t length);
+// Whether the current frame's fixed staging buffers can still take these sizes
+// (each including its own alignment slack).
+bool frame_has_room(size_t verts, size_t indices, size_t uniforms, size_t storage) noexcept;
 template <typename T>
 static Range push_storage(ArrayRef<T> data) {
   return push_storage(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T));

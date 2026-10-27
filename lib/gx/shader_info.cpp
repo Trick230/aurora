@@ -55,10 +55,11 @@ void color_arg_reg_info(GXTevColorArg arg, const TevStage& stage, ShaderInfo& in
     break;
   case GX_CC_TEXC:
   case GX_CC_TEXA:
-    CHECK(stage.texCoordId != GX_TEXCOORD_NULL, "tex coord not bound");
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "tex map not bound");
-    info.sampledTexCoords.set(stage.texCoordId);
-    info.sampledTextures.set(stage.texMapId);
+    // A disabled tex order reads constant white (see shader.cpp).
+    if (stage.texMapId != GX_TEXMAP_NULL) {
+      info.sampledTexCoords.set(stage.texCoordId);
+      info.sampledTextures.set(stage.texMapId);
+    }
     break;
   case GX_CC_RASC:
   case GX_CC_RASA:
@@ -129,10 +130,11 @@ void alpha_arg_reg_info(GXTevAlphaArg arg, const TevStage& stage, ShaderInfo& in
     }
     break;
   case GX_CA_TEXA:
-    CHECK(stage.texCoordId != GX_TEXCOORD_NULL, "tex coord not bound");
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "tex map not bound");
-    info.sampledTexCoords.set(stage.texCoordId);
-    info.sampledTextures.set(stage.texMapId);
+    // A disabled tex order reads constant white (see shader.cpp).
+    if (stage.texMapId != GX_TEXMAP_NULL) {
+      info.sampledTexCoords.set(stage.texCoordId);
+      info.sampledTextures.set(stage.texMapId);
+    }
     break;
   case GX_CA_RASA:
     if (stage.channelId != GX_COLOR_NULL && stage.channelId != GX_COLOR_ZERO &&
@@ -266,6 +268,10 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     if (tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) {
       info.sampledTexCoords.set(tcg.embossSrc);
       info.lightingEnabled = true;
+    } else if (tcg.src == GX_TG_COLOR0 || tcg.src == GX_TG_COLOR1) {
+      // Color texgen (SRTG) reads the lit channel, so compute it even when no
+      // TEV stage rasterizes it (toon ramps).
+      info.sampledColorChannels.set(tcg.src - GX_TG_COLOR0);
     }
   }
 
@@ -375,7 +381,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
   buf.clear();
   buf.reserve_extra(info.uniformSize);
 
-  buf.append(vtxStart);
+  // Draws without line/point expansion take their vertex start from
+  // firstInstance, leaving the block identical for draws sharing GX state.
+  buf.append(info.lineMode != 0 ? vtxStart : 0u);
   buf.append(g_gxState.currentPnMtx);
   buf.append<f32>(g_gxState.renderViewport.width);
   buf.append<f32>(g_gxState.renderViewport.height);
@@ -482,6 +490,19 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
     buf.append(texture_size_bias(tex));
   }
   g_gxState.stateDirty = false;
-  return gfx::push_uniform(buf.data(), buf.size());
+
+  // A level frame issues thousands of draws whose blocks mostly repeat; share
+  // them within the frame instead of filling the fixed uniform budget.
+  static absl::flat_hash_map<HashType, gfx::Range> pushed;
+  static u32 pushedFrame = UINT32_MAX;
+  if (pushedFrame != gfx::current_frame()) {
+    pushedFrame = gfx::current_frame();
+    pushed.clear();
+  }
+  const auto [it, inserted] = pushed.try_emplace(xxh3_hash_s(buf.data(), buf.size()));
+  if (inserted) {
+    it->second = gfx::push_uniform(buf.data(), buf.size());
+  }
+  return it->second;
 }
 } // namespace aurora::gx

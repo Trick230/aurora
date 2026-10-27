@@ -760,7 +760,10 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         .requiredFeatureCount = requiredInstanceFeatures.size(),
         .requiredFeatures = requiredInstanceFeatures.data(),
     };
-#ifdef WEBGPU_DAWN
+    // DawnInstanceDescriptor is C++ API whose constructor lives in the DLL; a
+    // MinGW build cannot link against the MSVC-built prebuilt. Its defaults
+    // (validation off) match, and device-level logging is set up below.
+#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
     dawnInstanceDescriptor.SetLoggingCallback(wgpu_log);

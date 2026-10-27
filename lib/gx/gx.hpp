@@ -380,6 +380,10 @@ struct GXState {
   u8 numIndStages = 0;
   u8 numTevStages = 0;
   u8 numTexGens = 0;
+  // XF dual texture transform (0x1012): post-transform matrices and
+  // normalization only apply while it is set. Aurora's own GX API never
+  // writes it, so it stays on unless a retail stream clears it.
+  bool dualTexTrans = true;
   bool stateDirty = true;
   std::array<u32, 0x100> bpRegCache = [] {
     std::array<u32, 0x100> regs{};
@@ -497,6 +501,8 @@ struct ShaderInfo {
 };
 struct BindGroupRanges {
   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
+
+  bool operator==(const BindGroupRanges& rhs) const = default;
 };
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept;
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,

@@ -161,6 +161,7 @@ wgpu::BindGroup g_uniformBindGroup;
 AuroraStats g_stats{};
 uint32_t g_drawCallCount = 0;
 uint32_t g_mergedDrawCallCount = 0;
+uint32_t g_droppedDrawCallCount = 0;
 
 using CommandList = std::vector<Command>;
 struct RenderPass {
@@ -1214,6 +1215,7 @@ bool begin_frame() {
 
   g_drawCallCount = 0;
   g_mergedDrawCallCount = 0;
+  g_droppedDrawCallCount = 0;
   g_suspendedEfbPass.reset();
 
   current_render_passes().emplace_back();
@@ -1268,6 +1270,7 @@ void end_frame(EndFrameCallback callback) {
   auto& frame = current_frame_packet();
   frame.stats.drawCallCount = g_drawCallCount;
   frame.stats.mergedDrawCallCount = g_mergedDrawCallCount;
+  frame.stats.droppedDrawCallCount = g_droppedDrawCallCount;
   frame.stats.lastVertSize = frame.verts.size();
   frame.stats.lastUniformSize = frame.uniforms.size();
   frame.stats.lastIndexSize = frame.indices.size();
@@ -1307,6 +1310,7 @@ void end_frame(EndFrameCallback callback) {
     packet = {};
     g_stats.drawCallCount = stats.drawCallCount;
     g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
+    g_stats.droppedDrawCallCount = stats.droppedDrawCallCount;
     g_stats.lastVertSize = stats.lastVertSize;
     g_stats.lastUniformSize = stats.lastUniformSize;
     g_stats.lastIndexSize = stats.lastIndexSize;
@@ -1714,6 +1718,12 @@ Range push_uniform(const uint8_t* data, size_t length) {
 Range push_storage(const uint8_t* data, size_t length) {
   ZoneScoped;
   return push(current_frame_packet().storage, data, length, g_cachedLimits.minStorageBufferOffsetAlignment);
+}
+
+bool frame_has_room(size_t verts, size_t indices, size_t uniforms, size_t storage) noexcept {
+  const auto& frame = current_frame_packet();
+  return frame.verts.remaining() >= verts && frame.indices.remaining() >= indices &&
+         frame.uniforms.remaining() >= uniforms && frame.storage.remaining() >= storage;
 }
 
 Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {
