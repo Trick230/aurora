@@ -483,6 +483,11 @@ void clear_copy_texture_cache() noexcept {
   }
 }
 
+// The copies kept for reuse by later copies of the same size. Live copies
+// stay: on hardware a copy is in guest memory, whatever the window does, and
+// the game may sample one long after making it (a texture it builds once).
+void clear_copy_reuse_cache() noexcept { g_gxState.copyTextureCache.clear(); }
+
 void clear_static_texture_cache() noexcept { s_staticTextureCacheClearPending.store(true, std::memory_order_release); }
 
 void evict_copy_texture(const void* dest) noexcept {

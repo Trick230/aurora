@@ -28,7 +28,7 @@
 #endif
 
 namespace aurora::gx {
-void clear_copy_texture_cache() noexcept;
+void clear_copy_reuse_cache() noexcept;
 } // namespace aurora::gx
 namespace aurora::gfx {
 void clear_offscreen_cache();
@@ -1097,7 +1097,7 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
   if (sizeChanged) {
     // Replays draw into the render targets replaced below.
     gfx::interp::discard();
-    gx::clear_copy_texture_cache();
+    gx::clear_copy_reuse_cache();
     gfx::clear_caches();
   }
   g_graphicsConfig.surfaceConfiguration.width = nativeWidth;
