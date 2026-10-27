@@ -42,6 +42,8 @@ SDL_Window* g_window;
 SDL_Renderer* g_renderer;
 float g_frameBufferScale = 0.f;
 bool g_frameBufferAspectFit = false;
+bool g_frameOpen = false;
+bool g_resizePending = false;
 AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::atomic_bool g_backgrounded = false;
@@ -82,6 +84,11 @@ Vec2<int> fit_frame_buffer_to_aspect(int width, int height, float aspect) {
 }
 
 void resize_swapchain() noexcept {
+  if (g_frameOpen) {
+    g_resizePending = true;
+    return;
+  }
+  g_resizePending = false;
   const auto size = get_window_size();
   if (size == g_windowSize) {
     return;
@@ -278,6 +285,10 @@ bool create_window(AuroraBackend backend) {
   if (height < 480) {
     height = 480;
   }
+  const float aspect = g_config.displayAspect;
+  if (aspect > 0.f) {
+    height = static_cast<Sint32>(std::lround(static_cast<float>(width) / aspect));
+  }
 
   Sint32 posX = g_config.windowPosX;
   Sint32 posY = g_config.windowPosY;
@@ -306,7 +317,13 @@ bool create_window(AuroraBackend backend) {
     Log.error("Failed to create window: {}", SDL_GetError());
     return false;
   }
-  SDL_SetWindowMinimumSize(g_window, 640, 480);
+  if (aspect > 0.f) {
+    SDL_SetWindowMinimumSize(g_window, 640, static_cast<int>(std::lround(640.f / aspect)));
+    TRY_WARN(SDL_SetWindowAspectRatio(g_window, aspect, aspect), "Failed to set window aspect ratio: {}",
+             SDL_GetError());
+  } else {
+    SDL_SetWindowMinimumSize(g_window, 640, 480);
+  }
   set_window_icon();
   return true;
 }
@@ -400,7 +417,11 @@ AuroraWindowSize get_window_size() {
     fb_w = scaledW;
     fb_h = scaledH;
   }
-  if (g_frameBufferAspectFit) {
+  if (g_config.displayAspect > 0.f) {
+    const auto [fitW, fitH] = fit_frame_buffer_to_aspect(fb_w, fb_h, g_config.displayAspect);
+    fb_w = fitW;
+    fb_h = fitH;
+  } else if (g_frameBufferAspectFit) {
     const auto [baseW, baseH] = vi::configured_fb_size();
     if (baseW > 0 && baseH > 0) {
       const auto [fitW, fitH] =
@@ -499,6 +520,13 @@ void request_frame_buffer_resize() {
   if (g_window != nullptr) {
     // Defer so that we don't try to reconfigure the surface in the middle of game logic.
     push_future_resize_event();
+  }
+}
+
+void set_frame_open(bool open) noexcept {
+  g_frameOpen = open;
+  if (!open && g_resizePending) {
+    resize_swapchain();
   }
 }
 

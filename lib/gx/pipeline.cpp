@@ -1,5 +1,6 @@
 #include "pipeline.hpp"
 
+#include "../gfx/frame_interp.hpp"
 #include "../webgpu/gpu.hpp"
 #include "gx_fmt.hpp"
 #include "shader_info.hpp"
@@ -17,7 +18,8 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   return build_pipeline(config, {}, shader, label.c_str());
 }
 
-void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+template <typename Encoder>
+static void encode_draw(const DrawData& data, const Encoder& pass) {
   if (data.cullMode == GX_CULL_ALL) {
     return;
   }
@@ -26,14 +28,16 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   }
 
   const std::array offsets{data.uniformRange.offset};
-  pass.SetBindGroup(1, gfx::g_uniformBindGroup, offsets.size(), offsets.data());
+  pass.SetBindGroup(1, *gfx::interp::g_vertexUniformBindGroup, offsets.size(), offsets.data());
   if (data.bindGroups.textureBindGroup) {
     pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
   }
   pass.SetIndexBuffer(gfx::g_indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
-  if (data.dstAlpha != UINT32_MAX) {
-    const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
-    pass.SetBlendConstant(&color);
+  if constexpr (std::is_same_v<Encoder, wgpu::RenderPassEncoder>) {
+    if (data.dstAlpha != UINT32_MAX) {
+      const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
+      pass.SetBlendConstant(&color);
+    }
   }
   if (data.indexCount == 0) {
     pass.Draw(data.vtxCount, data.instanceCount, 0, data.firstInstance);
@@ -41,4 +45,8 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
     pass.DrawIndexed(data.indexCount, data.instanceCount, 0, 0, data.firstInstance);
   }
 }
+
+void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) { encode_draw(data, pass); }
+
+void render(const DrawData& data, const wgpu::RenderBundleEncoder& bundle) { encode_draw(data, bundle); }
 } // namespace aurora::gx

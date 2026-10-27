@@ -243,6 +243,7 @@ bool begin_frame() noexcept {
   if (!gfx::begin_frame()) {
     return false;
   }
+  window::set_frame_open(true);
 #endif
   return true;
 }
@@ -417,7 +418,7 @@ void end_frame() noexcept {
     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
   });
-
+  window::set_frame_open(false);
 #endif
 }
 } // namespace

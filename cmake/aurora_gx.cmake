@@ -3,6 +3,7 @@ add_library(aurora_gx STATIC
         lib/gfx/common.cpp
         lib/gfx/depth_peek.cpp
         lib/gfx/efb_readback.cpp
+        lib/gfx/frame_interp.cpp
         lib/gfx/pipeline_cache.cpp
         lib/gfx/render_worker.cpp
         lib/gfx/dds_io.cpp

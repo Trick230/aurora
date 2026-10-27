@@ -48,6 +48,9 @@ void set_window_size(uint32_t width, uint32_t height);
 void set_window_position(uint32_t x, uint32_t y);
 void center_window();
 void request_frame_buffer_resize();
+// Between begin_frame and end_frame the frame being recorded uses the render
+// targets and caches a resize replaces: resizes wait for the frame to end.
+void set_frame_open(bool open) noexcept;
 void set_frame_buffer_scale(float scale);
 void set_frame_buffer_aspect_fit(bool fit);
 void set_background_input(bool value);

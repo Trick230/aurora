@@ -119,6 +119,20 @@ typedef struct {
    * This can be set to 0 to disable allocating this region.
    */
   uint32_t mem2Size;
+
+  /*
+   * Show the game's frames one frame late and present replays of each with
+   * its draws' matrices blended toward the frame before, at the display's
+   * refresh rate (vsync) or presentRate (no vsync; 0 = the refresh rate).
+   */
+  bool frameInterpolation;
+  uint32_t presentRate;
+  /**
+   * The aspect the game's frames are shown at, whatever the window's: they
+   * are rendered at it and letterboxed, and the window keeps it as it is
+   * resized. 0 stretches them to the window.
+   */
+  float displayAspect;
 } AuroraConfig;
 
 typedef struct {

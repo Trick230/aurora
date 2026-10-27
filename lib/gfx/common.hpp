@@ -324,6 +324,7 @@ DrawData* get_last_draw_command();
 template <typename PipelineConfig>
 PipelineRef pipeline_ref(const PipelineConfig& config);
 bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
+bool bind_pipeline(PipelineRef ref, const wgpu::RenderBundleEncoder& bundle);
 
 BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor);
 wgpu::BindGroup find_bind_group(BindGroupRef id);

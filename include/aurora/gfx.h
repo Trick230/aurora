@@ -27,6 +27,13 @@ typedef struct {
   uint32_t lastIndexSize;
   uint32_t lastStorageSize;
   uint32_t lastTextureUploadSize;
+  // Frame interpolation, running totals: frames replayed, replays presented,
+  // the frames' GX draws and those of them blended.
+  uint32_t interpFrames;
+  uint32_t interpPresents;
+  uint32_t interpDraws;
+  uint32_t interpBlendedDraws;
+  uint32_t interpMicros; // render worker time spent blending and encoding replays
 } AuroraStats;
 
 const AuroraStats* aurora_get_stats();

@@ -373,11 +373,17 @@ gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcep
 
   const float scaleX = static_cast<float>(targetWidth) / static_cast<float>(logicalFbWidth);
   const float scaleY = static_cast<float>(targetHeight) / static_cast<float>(logicalFbHeight);
+  // Edges on whole target pixels, as map_logical_scissor and copies put
+  // them: at a fractional scale, a viewport ending inside a pixel leaves it
+  // half drawn, and a copy of the region (a downscaled pass for bloom) then
+  // spreads whatever it held.
+  const float left = std::round(logicalViewport.left * scaleX);
+  const float top = std::round(logicalViewport.top * scaleY);
   return {
-      .left = logicalViewport.left * scaleX,
-      .top = logicalViewport.top * scaleY,
-      .width = logicalViewport.width * scaleX,
-      .height = logicalViewport.height * scaleY,
+      .left = left,
+      .top = top,
+      .width = std::round((logicalViewport.left + logicalViewport.width) * scaleX) - left,
+      .height = std::round((logicalViewport.top + logicalViewport.height) * scaleY) - top,
       .znear = logicalViewport.znear,
       .zfar = logicalViewport.zfar,
   };
@@ -402,12 +408,12 @@ gfx::ClipRect map_logical_scissor(const gfx::ClipRect& logicalScissor) noexcept 
   const float right = static_cast<float>(logicalScissor.x + logicalScissor.width) * scaleX;
   const float bottom = static_cast<float>(logicalScissor.y + logicalScissor.height) * scaleY;
 
-  const auto mappedLeft = std::clamp(static_cast<int32_t>(std::floor(left)), 0, static_cast<int32_t>(targetWidth));
-  const auto mappedTop = std::clamp(static_cast<int32_t>(std::floor(top)), 0, static_cast<int32_t>(targetHeight));
+  const auto mappedLeft = std::clamp(static_cast<int32_t>(std::round(left)), 0, static_cast<int32_t>(targetWidth));
+  const auto mappedTop = std::clamp(static_cast<int32_t>(std::round(top)), 0, static_cast<int32_t>(targetHeight));
   const auto mappedRight =
-      std::clamp(static_cast<int32_t>(std::ceil(right)), mappedLeft, static_cast<int32_t>(targetWidth));
+      std::clamp(static_cast<int32_t>(std::round(right)), mappedLeft, static_cast<int32_t>(targetWidth));
   const auto mappedBottom =
-      std::clamp(static_cast<int32_t>(std::ceil(bottom)), mappedTop, static_cast<int32_t>(targetHeight));
+      std::clamp(static_cast<int32_t>(std::round(bottom)), mappedTop, static_cast<int32_t>(targetHeight));
 
   return {
       .x = mappedLeft,

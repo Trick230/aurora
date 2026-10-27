@@ -15,6 +15,7 @@
 #include <webgpu/webgpu_cpp.h>
 
 #include "../gfx/common.hpp"
+#include "../gfx/frame_interp.hpp"
 #include "../gfx/render_worker.hpp"
 #include "../internal.hpp"
 #include "../window.hpp"
@@ -197,7 +198,9 @@ wgpu::PresentMode best_present_mode(bool vsync) {
     return false;
   };
   if (vsync) {
-    if (supports(wgpu::PresentMode::FifoRelaxed)) {
+    // Relaxed FIFO tears a late frame in rather than wait; frame
+    // interpolation presents back to back, so any late one would tear.
+    if (!g_config.frameInterpolation && supports(wgpu::PresentMode::FifoRelaxed)) {
       return wgpu::PresentMode::FifoRelaxed;
     }
   } else {
@@ -1092,6 +1095,8 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
     return;
   }
   if (sizeChanged) {
+    // Replays draw into the render targets replaced below.
+    gfx::interp::discard();
     gx::clear_copy_texture_cache();
     gfx::clear_caches();
   }

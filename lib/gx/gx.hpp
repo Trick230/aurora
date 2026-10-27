@@ -4,6 +4,7 @@
 
 #include "../internal.hpp"
 #include "../gfx/common.hpp"
+#include "../gfx/frame_interp.hpp"
 #include "../gfx/texture.hpp"
 
 #include <absl/container/flat_hash_map.h>
@@ -291,6 +292,9 @@ struct GXState {
     operator bool() const noexcept { return handle.operator bool(); }
   };
   std::array<PnMtx, MaxPnMtx> pnMtx;
+  // Where each matrix came from: 1 + its index for an indexed load, 0 for an
+  // inline one. Frame interpolation pairs a skinned draw's bones by it.
+  std::array<gfx::interp::MatrixSources, MaxPnMtx> pnMtxSource{};
   u32 currentPnMtx;
   Mat4x4<float> proj;
   GXProjectionType projType; // for GXGetProjectionv

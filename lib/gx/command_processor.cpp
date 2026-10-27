@@ -2,6 +2,7 @@
 
 #include "../gfx/common.hpp"
 #include "../gfx/depth_peek.hpp"
+#include "../gfx/frame_interp.hpp"
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
 #include "gx_fmt.hpp"
@@ -275,7 +276,8 @@ static void shadow_xf(u32 addr, const u8* data, u32 count, bool bigEndian) {
   }
 }
 
-static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
+// source: what loaded the data, for position and normal matrices (see GXState::pnMtxSource).
+static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian, u32 source) {
   if (addr < 0x78) {
     // Position matrices (0x0000 - 0x0077)
     u32 mtxIdx = addr / 12;
@@ -284,6 +286,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     CHECK(mtxIdx < MaxPnMtx, "XF: PosMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
     CHECK(startOffset == 0 && len == 12, "XF: PosMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
     auto& mtx = g_gxState.pnMtx[mtxIdx].pos;
+    g_gxState.pnMtxSource[mtxIdx].pos = source;
     f32* flat = reinterpret_cast<f32*>(&mtx);
     for (u32 i = 0; i < len; i++) {
       flat[i] = read_f32(data + i * 4, bigEndian);
@@ -316,6 +319,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
     CHECK(mtxIdx < MaxPnMtx, "XF: NrmMtx copy oob? Should never happen; mtxIdx={}", mtxIdx);
     CHECK(startOffset == 0 && len == 9, "XF: NrmMtx sub-copy unsupported: offs={}, len={}", startOffset, len);
     auto& mtx = g_gxState.pnMtx[mtxIdx].nrm;
+    g_gxState.pnMtxSource[mtxIdx].nrm = source;
     f32* flat = reinterpret_cast<f32*>(&mtx);
     for (u32 i = 0; i < len; i++) {
       u32 xfIdx = i;
@@ -470,7 +474,10 @@ void process(const u8* data, u32 size, bool bigEndian) {
       }
       const u8* srcData = static_cast<const u8*>(array.data) + srcOffset;
       shadow_xf(dstAddr, srcData, len, bigEndian);
-      if (!copy_xf_data(dstAddr, srcData, len, bigEndian)) {
+      // The matrix's address identifies it across frames: models keep their
+      // matrices in arrays of their own.
+      const auto source = static_cast<u32>(reinterpret_cast<std::uintptr_t>(srcData) >> 2) | 1u;
+      if (!copy_xf_data(dstAddr, srcData, len, bigEndian, source)) {
 #ifndef NDEBUG
         Log.debug("Unimplemented indexed XF load (opcode 0x{:02X}, dstAddr=%04x)", opcode, dstAddr);
 #endif
@@ -1521,7 +1528,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
   const u8* xfData = data + pos;
   shadow_xf(addr, xfData, count, bigEndian);
 
-  if (copy_xf_data(addr, xfData, count, bigEndian)) {
+  if (copy_xf_data(addr, xfData, count, bigEndian, 0)) {
     // copy_xf_data handled everything.
   } else if (addr >= 0x1000) {
     // XF registers (0x1000+)
@@ -1780,6 +1787,7 @@ static struct {
   gfx::PipelineRef pipeline{};
   GXBindGroups bindGroups{};
   gfx::Range uniformRange{};
+  gfx::interp::BlockLayout layout;
 } s_lastDraw;
 
 // The vertex array ranges a draw would bind, or nothing if one of its arrays
@@ -2075,11 +2083,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   gfx::PipelineRef pipeline;
   GXBindGroups bindGroups;
   gfx::Range uniformRange;
+  gfx::interp::BlockLayout layout;
   if (!expanded && !g_gxState.stateDirty && s_last.frame == gfx::current_frame() && s_last.fmt == fmt &&
       std::memcmp(&s_last.ranges, &ranges, sizeof(ranges)) == 0) {
     pipeline = s_last.pipeline;
     bindGroups = s_last.bindGroups;
     uniformRange = s_last.uniformRange;
+    layout = s_last.layout;
   } else {
     PipelineConfig config{};
     populate_pipeline_config(config, prim, fmt);
@@ -2087,15 +2097,33 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     resolve_sampled_textures(info);
     bindGroups = build_bind_groups(info);
     pipeline = gfx::pipeline_ref(config);
-    uniformRange = build_uniform(info, vertRange.offset, ranges);
+    uniformRange = build_uniform(info, vertRange.offset, ranges, &layout);
     s_last.frame = expanded ? UINT32_MAX : gfx::current_frame();
     s_last.fmt = fmt;
     s_last.ranges = ranges;
     s_last.pipeline = pipeline;
     s_last.bindGroups = bindGroups;
     s_last.uniformRange = uniformRange;
+    s_last.layout = layout;
   }
 
+  if (gfx::interp::enabled()) {
+    Hasher hasher;
+    hasher.update(pipeline);
+    hasher.update(bindGroups.textureBindGroup);
+    const auto group = static_cast<HashType>(hasher.digest());
+    hasher.update(static_cast<u32>(vtxCount));
+    hasher.update(numIndices);
+    gfx::interp::record_draw({
+        .key = static_cast<HashType>(hasher.digest()),
+        .group = group,
+        .offset = layout.matrices,
+        .current = g_gxState.currentPnMtx,
+        .sources = g_gxState.pnMtxSource,
+        .lights = layout.lights,
+        .post = layout.post,
+    });
+  }
   gfx::push_draw_command(DrawData{
       .pipeline = pipeline,
       .vertRange = vertRange,

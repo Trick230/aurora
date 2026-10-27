@@ -374,7 +374,8 @@ static u32 line_texcoord_mask() noexcept {
   return mask;
 }
 
-gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges) noexcept {
+gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
+                         gfx::interp::BlockLayout* layout) noexcept {
   ZoneScoped;
 
   static ByteBuffer buf;
@@ -406,6 +407,7 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
       buf.append<u32>(line_texcoord_mask());
     }
   }
+  const auto matrices = static_cast<u32>(buf.size());
   buf.append(g_gxState.proj);
 
   for (int i = 0; i < MaxPnMtx; i++) {
@@ -425,7 +427,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
       buf.append(g_gxState.colorRegs[i]);
     }
   }
+  u32 lights = 0;
   if (info.lightingEnabled) {
+    lights = (static_cast<u32>(buf.size()) - matrices) / 4;
     // Lights
     static_assert(sizeof(g_gxState.lights) == 80 * GX::MaxLights);
     buf.append(g_gxState.lights);
@@ -460,7 +464,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
       buf.append(g_gxState.kcolors[i]);
     }
   }
+  u32 post = 0;
   if (info.usesPTTexMtx.any()) {
+    post = (static_cast<u32>(buf.size()) - matrices) / 4;
     for (int i = 0; i < info.usesPTTexMtx.size(); ++i) {
       buf.append(g_gxState.ptTexMtxs[i]);
     }
@@ -503,6 +509,11 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
   if (inserted) {
     it->second = gfx::push_uniform(buf.data(), buf.size());
   }
+  *layout = {
+      .matrices = it->second.offset + matrices,
+      .lights = static_cast<uint16_t>(lights),
+      .post = static_cast<uint16_t>(post),
+  };
   return it->second;
 }
 } // namespace aurora::gx

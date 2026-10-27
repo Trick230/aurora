@@ -7,6 +7,7 @@
 #include "../webgpu/gpu.hpp"
 #include "../webgpu/gpu_prof.hpp"
 #include "../gx/pipeline.hpp"
+#include "frame_interp.hpp"
 #ifdef AURORA_ENABLE_GXCORE
 #include "gxcore_draw.hpp"
 #endif
@@ -37,6 +38,7 @@
 
 namespace aurora::gfx {
 static Module Log("aurora::gfx");
+
 
 using webgpu::g_device;
 using webgpu::g_instance;
@@ -164,6 +166,21 @@ uint32_t g_mergedDrawCallCount = 0;
 uint32_t g_droppedDrawCallCount = 0;
 
 using CommandList = std::vector<Command>;
+
+// A replayed pass is runs of GX draws in render bundles, separated by the
+// commands bundles cannot hold.
+struct ReplayStep {
+  enum class Kind : uint8_t {
+    Bundle,
+    Command,       // encoded on the pass as recorded (viewport, scissor, non-GX draws)
+    BlendConstant, // a GX draw's destination alpha
+  };
+  Kind kind = Kind::Bundle;
+  wgpu::RenderBundle bundle;
+  const Command* command = nullptr;
+  float alpha = 0.f;
+};
+
 struct RenderPass {
   std::string label;
   wgpu::TextureView colorView;
@@ -197,8 +214,15 @@ struct RenderPass {
   bool observable = false;
   bool captureDepthSnapshot = false;
   bool sealed = false;
+  // Targets the EFB formats, so interpolated replays can run its commands
+  // from render bundles.
+  bool bundleable = true;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
+  // Built by the first replay of the frame.
+  std::vector<ReplayStep> replaySteps;
+  bool replayBuilt = false;
 };
+
 
 struct TextureCopy {
   wgpu::TexelCopyTextureInfo src;
@@ -237,9 +261,14 @@ struct FramePacket {
   size_t stagingBuffer = 0;
   StagingHighWater copied;
   AuroraStats stats{};
+  // With frame interpolation: a CPU copy of the uniform stream, and the GX
+  // draws' blocks in it.
+  ByteBuffer uniformShadow;
+  std::vector<interp::DrawRecord> interpDraws;
 };
 
 static std::array<FramePacket, FrameSlotCount> g_framePackets;
+static size_t g_lastUniformShadowSize = 0;
 static FramePacket* g_recordingFrame = nullptr;
 static size_t g_recordingFrameSlot = 0;
 static uint64_t g_nextFrameId = 1;
@@ -466,9 +495,10 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
 
 static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op);
 static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex);
-static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, const RenderPass& passInfo);
+static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo);
 static void expire_cached_bind_groups();
 static void push_command(CommandType type, const Command::Data& data);
+static void replay_frame(wgpu::CommandEncoder& cmd, FramePacket& frame);
 
 static void enqueue_op(FramePacket& frame, size_t frameSlot, uint32_t opIndex) {
   if (opIndex >= frame.ops.size()) {
@@ -591,6 +621,7 @@ void begin_color_pass(const ColorPassDescriptor& desc) {
       .hasDepth = desc.hasDepth,
       .hasStencil = desc.hasStencil,
       .observable = desc.observable,
+      .bundleable = false,
   };
   pass.commands.reserve(128);
   frame.renderPasses.emplace_back(std::move(pass));
@@ -717,6 +748,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
       .clearDepth = clearDepth,
       .hasDepth = prevPass.hasDepth,
       .hasStencil = prevPass.hasStencil,
+      .bundleable = prevPass.bundleable,
   };
   newPass.commands.reserve(2048);
   current_render_passes().emplace_back(std::move(newPass));
@@ -1077,9 +1109,13 @@ void initialize() {
   rmlui::initialize_pipeline();
 #endif
   initialize_pipeline_cache();
+  if (g_config.frameInterpolation) {
+    interp::initialize(g_config.vsync, g_config.presentRate);
+  }
 }
 
 void shutdown() {
+  interp::shutdown();
   render_worker::synchronize();
   render_worker::shutdown();
   g_processEventsQueued.store(false, std::memory_order_release);
@@ -1193,6 +1229,9 @@ bool begin_frame() {
   frame.frameId = g_nextFrameId++;
   frame.frameIndex = g_frameIndex;
   frame.stagingBuffer = *stagingSlot;
+  if (interp::enabled()) {
+    frame.uniformShadow.reserve_extra(g_lastUniformShadowSize);
+  }
   g_recordingFrame = &frame;
   g_recordingFrameSlot = frameSlot;
 
@@ -1257,6 +1296,17 @@ void finish() {
   }
 }
 
+static void publish_frame_stats(const AuroraStats& stats) {
+  g_stats.drawCallCount = stats.drawCallCount;
+  g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
+  g_stats.droppedDrawCallCount = stats.droppedDrawCallCount;
+  g_stats.lastVertSize = stats.lastVertSize;
+  g_stats.lastUniformSize = stats.lastUniformSize;
+  g_stats.lastIndexSize = stats.lastIndexSize;
+  g_stats.lastStorageSize = stats.lastStorageSize;
+  g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+}
+
 void end_frame(EndFrameCallback callback) {
   ZoneScoped;
   ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
@@ -1307,15 +1357,38 @@ void end_frame(EndFrameCallback callback) {
     s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
     auto encoder = std::move(packet.encoder);
     const auto stats = packet.stats;
+    if (interp::enabled() && callback) {
+      // The frame is submitted, for its copies and side effects, when
+      // interpolation reaches it; what is shown are its replays. Its slot is
+      // held until then.
+      auto retained = std::make_shared<FramePacket>();
+      retained->renderPasses = std::move(packet.renderPasses);
+      retained->textureCopies = std::move(packet.textureCopies);
+      retained->ops = std::move(packet.ops);
+      g_lastUniformShadowSize = packet.uniformShadow.size();
+      auto uniforms = std::move(packet.uniformShadow);
+      auto draws = std::move(packet.interpDraws);
+      packet = {};
+      interp::push_frame(
+          std::move(uniforms), std::move(draws), [retained](wgpu::CommandEncoder& cmd) { replay_frame(cmd, *retained); },
+          std::move(callback), [frameSlot, stagingSlot, encoder = std::move(encoder), stats]() mutable {
+            webgpu::gpu_prof::frame_end(encoder);
+            const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Frame command buffer"};
+            const auto buffer = encoder.Finish(&cmdBufDescriptor);
+            webgpu::g_queue.Submit(1, &buffer);
+            webgpu::gpu_prof::after_submit();
+            after_submit();
+            encoder = {};
+            publish_frame_stats(stats);
+            g_frameSlots.release(frameSlot);
+            expire_cached_bind_groups();
+            map_staging_buffer(stagingSlot, true);
+            process_events();
+          });
+      return;
+    }
     packet = {};
-    g_stats.drawCallCount = stats.drawCallCount;
-    g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
-    g_stats.droppedDrawCallCount = stats.droppedDrawCallCount;
-    g_stats.lastVertSize = stats.lastVertSize;
-    g_stats.lastUniformSize = stats.lastUniformSize;
-    g_stats.lastIndexSize = stats.lastIndexSize;
-    g_stats.lastStorageSize = stats.lastStorageSize;
-    g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+    publish_frame_stats(stats);
     if (callback) {
       callback(encoder);
     }
@@ -1486,7 +1559,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
   render_pass(pass, frame, passInfo);
   pass.End();
 
-  if (passInfo.captureDepthSnapshot) {
+  if (passInfo.captureDepthSnapshot && !interp::replaying()) {
     depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
   }
 
@@ -1533,6 +1606,21 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
   }
 }
 
+static void replay_frame(wgpu::CommandEncoder& cmd, FramePacket& frame) {
+  ZoneScoped;
+  for (const auto& op : frame.ops) {
+    if (op.type == FrameOpType::RenderPass) {
+      if (op.renderPass != nullptr) {
+        render(cmd, frame, *op.renderPass, op.index);
+      }
+    } else if (op.textureCopy != nullptr) {
+      cmd.CopyTextureToTexture(&op.textureCopy->src, &op.textureCopy->dst, &op.textureCopy->size);
+    }
+  }
+}
+
+void interp::record_draw(const DrawRecord& record) { current_frame_packet().interpDraws.push_back(record); }
+
 void after_submit() noexcept {
   depth_peek::after_submit();
   efb_readback::after_submit();
@@ -1570,16 +1658,144 @@ float calculate_fps() noexcept {
   return static_cast<float>(g_presentTimes.size() - 1) / elapsed;
 }
 
-static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, const RenderPass& passInfo) {
-  ZoneScoped;
+static void encode_command(const wgpu::RenderPassEncoder& pass, const RenderPass& passInfo, const Command& cmd) {
+  switch (cmd.type) {
+  case CommandType::SetViewport: {
+    const auto& vp = cmd.data.setViewport;
+    const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
+    const float maxDepth = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
+    pass.SetViewport(vp.left, vp.top, vp.width, vp.height, minDepth, maxDepth);
+  } break;
+  case CommandType::SetScissor: {
+    const auto& sc = cmd.data.setScissor;
+    const auto& size = passInfo.targetSize;
+    const auto x = std::clamp(static_cast<uint32_t>(sc.x), 0u, size.width);
+    const auto y = std::clamp(static_cast<uint32_t>(sc.y), 0u, size.height);
+    const auto w = std::clamp(static_cast<uint32_t>(sc.width), 0u, size.width - x);
+    const auto h = std::clamp(static_cast<uint32_t>(sc.height), 0u, size.height - y);
+    pass.SetScissorRect(x, y, w, h);
+  } break;
+  case CommandType::Draw: {
+    const auto& draw = cmd.data.draw;
+    switch (draw.type) {
+    case ShaderType::Clear:
+      clear::render(draw.clear, pass, passInfo.targetSize);
+      break;
+    case ShaderType::GX:
+      gx::render(draw.gx, pass);
+      break;
+#ifdef AURORA_ENABLE_RMLUI
+    case ShaderType::Rml:
+      rmlui::render(draw.rml, pass);
+      break;
+#endif
+#ifdef AURORA_ENABLE_GXCORE
+    case ShaderType::GXCore:
+      gxcore::render(draw.gxcore, pass);
+      break;
+#endif
+    }
+  } break;
+  case CommandType::DebugMarker: {
+#if defined(AURORA_GFX_DEBUG_GROUPS)
+    pass.InsertDebugMarker(wgpu::StringView(g_debugMarkers[cmd.data.debugMarkerIndex]));
+#endif
+  } break;
+  }
+}
+
+static void bind_pass_groups(const wgpu::RenderPassEncoder& pass) {
   g_currentPipeline = UINTPTR_MAX;
+  pass.SetBindGroup(0, g_staticBindGroup);
+  pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+}
+
+// Splits the pass's commands into replay steps, recording its GX draws into
+// render bundles once per frame.
+static void build_replay_steps(RenderPass& passInfo) {
+  ZoneScoped;
+  const wgpu::TextureFormat colorFormat = webgpu::g_graphicsConfig.surfaceConfiguration.format;
+  const wgpu::RenderBundleEncoderDescriptor descriptor{
+      .label = "Replay bundle",
+      .colorFormatCount = 1,
+      .colorFormats = &colorFormat,
+      .depthStencilFormat =
+          passInfo.depthStencilView ? webgpu::g_graphicsConfig.depthFormat : wgpu::TextureFormat::Undefined,
+      .sampleCount = passInfo.msaaSamples,
+  };
+  auto& steps = passInfo.replaySteps;
+  wgpu::RenderBundleEncoder bundle;
+  const auto flush = [&] {
+    if (bundle) {
+      steps.push_back({.kind = ReplayStep::Kind::Bundle, .bundle = bundle.Finish()});
+      bundle = {};
+    }
+  };
+  for (const auto& cmd : passInfo.commands) {
+    if (cmd.type == CommandType::DebugMarker) {
+      continue;
+    }
+    if (cmd.type != CommandType::Draw || cmd.data.draw.type != ShaderType::GX) {
+      flush();
+      steps.push_back({.kind = ReplayStep::Kind::Command, .command = &cmd});
+      continue;
+    }
+    const auto& draw = cmd.data.draw.gx;
+    if (draw.dstAlpha != UINT32_MAX) {
+      flush();
+      steps.push_back({.kind = ReplayStep::Kind::BlendConstant, .alpha = draw.dstAlpha / 255.f});
+    }
+    if (!bundle) {
+      bundle = g_device.CreateRenderBundleEncoder(&descriptor);
+      g_currentPipeline = UINTPTR_MAX;
+      bundle.SetBindGroup(0, g_staticBindGroup);
+      bundle.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+    }
+    gx::render(draw, bundle);
+  }
+  flush();
+  passInfo.replayBuilt = true;
+}
+
+static void replay_pass(const wgpu::RenderPassEncoder& pass, RenderPass& passInfo) {
+  ZoneScoped;
+  if (!passInfo.replayBuilt) {
+    build_replay_steps(passInfo);
+  }
+  bool bound = false;
+  for (const auto& step : passInfo.replaySteps) {
+    switch (step.kind) {
+    case ReplayStep::Kind::Bundle:
+      pass.ExecuteBundles(1, &step.bundle);
+      bound = false; // bundles leave the pass's bindings unset
+      break;
+    case ReplayStep::Kind::Command:
+      if (step.command->type == CommandType::Draw && !bound) {
+        bind_pass_groups(pass);
+        bound = true;
+      }
+      encode_command(pass, passInfo, *step.command);
+      break;
+    case ReplayStep::Kind::BlendConstant: {
+      const wgpu::Color color{0.f, 0.f, 0.f, step.alpha};
+      pass.SetBlendConstant(&color);
+    } break;
+    }
+  }
+}
+
+static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
+  ZoneScoped;
+  if (interp::replaying() && passInfo.bundleable) {
+    replay_pass(pass, passInfo);
+    return;
+  }
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> lastDebugGroupStack;
 #endif
 
   // Bind static bind group for the whole pass
-  pass.SetBindGroup(0, g_staticBindGroup);
-  pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+  bind_pass_groups(pass);
 
   for (const auto& cmd : passInfo.commands) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
@@ -1600,49 +1816,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
       lastDebugGroupStack = cmd.debugGroupStack;
     }
 #endif
-    switch (cmd.type) {
-    case CommandType::SetViewport: {
-      const auto& vp = cmd.data.setViewport;
-      const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
-      const float maxDepth = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
-      pass.SetViewport(vp.left, vp.top, vp.width, vp.height, minDepth, maxDepth);
-    } break;
-    case CommandType::SetScissor: {
-      const auto& sc = cmd.data.setScissor;
-      const auto& size = passInfo.targetSize;
-      const auto x = std::clamp(static_cast<uint32_t>(sc.x), 0u, size.width);
-      const auto y = std::clamp(static_cast<uint32_t>(sc.y), 0u, size.height);
-      const auto w = std::clamp(static_cast<uint32_t>(sc.width), 0u, size.width - x);
-      const auto h = std::clamp(static_cast<uint32_t>(sc.height), 0u, size.height - y);
-      pass.SetScissorRect(x, y, w, h);
-    } break;
-    case CommandType::Draw: {
-      const auto& draw = cmd.data.draw;
-      switch (draw.type) {
-      case ShaderType::Clear:
-        clear::render(draw.clear, pass, passInfo.targetSize);
-        break;
-      case ShaderType::GX:
-        gx::render(draw.gx, pass);
-        break;
-#ifdef AURORA_ENABLE_RMLUI
-      case ShaderType::Rml:
-        rmlui::render(draw.rml, pass);
-        break;
-#endif
-#ifdef AURORA_ENABLE_GXCORE
-      case ShaderType::GXCore:
-        gxcore::render(draw.gxcore, pass);
-        break;
-#endif
-      }
-    } break;
-    case CommandType::DebugMarker: {
-#if defined(AURORA_GFX_DEBUG_GROUPS)
-      pass.InsertDebugMarker(wgpu::StringView(g_debugMarkers[cmd.data.debugMarkerIndex]));
-#endif
-    } break;
-    }
+    encode_command(pass, passInfo, cmd);
   }
 
 #ifdef AURORA_GFX_DEBUG_GROUPS
@@ -1657,7 +1831,8 @@ void render_pass(const wgpu::RenderPassEncoder& pass, u32 idx) {
   render_pass(pass, frame, frame.renderPasses[idx]);
 }
 
-bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
+template <typename Encoder>
+static bool bind_pipeline_on(PipelineRef ref, const Encoder& pass) {
   if (ref == g_currentPipeline) {
     return true;
   }
@@ -1669,6 +1844,10 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
   g_currentPipeline = ref;
   return true;
 }
+
+bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) { return bind_pipeline_on(ref, pass); }
+
+bool bind_pipeline(PipelineRef ref, const wgpu::RenderBundleEncoder& bundle) { return bind_pipeline_on(ref, bundle); }
 
 static Range push(ByteBuffer& target, const uint8_t* data, size_t length, size_t alignment) {
   if (alignment != 0) {
@@ -1712,7 +1891,14 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
 
 Range push_uniform(const uint8_t* data, size_t length) {
   ZoneScoped;
-  return push(current_frame_packet().uniforms, data, length, g_cachedLimits.minUniformBufferOffsetAlignment);
+  auto& frame = current_frame_packet();
+  const auto range = push(frame.uniforms, data, length, g_cachedLimits.minUniformBufferOffsetAlignment);
+  if (interp::enabled()) {
+    auto& shadow = frame.uniformShadow;
+    shadow.append_zeroes(range.offset - shadow.size());
+    shadow.append(data, length);
+  }
+  return range;
 }
 
 Range push_storage(const uint8_t* data, size_t length) {
