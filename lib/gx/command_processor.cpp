@@ -27,74 +27,57 @@ static Module Log("aurora::gx::fifo");
 static u32 s_display_list_depth = 0;
 static constexpr u32 MaxDisplayListDepth = 16;
 
+// Triangle-list indices for a primitive's vertices, appended to buf. The
+// buffer grows once and the indices go straight in.
 static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
-  u16 numIndices = 0;
+  const auto out = [&buf](u32 count) { return reinterpret_cast<u16*>(buf.extend(count * sizeof(u16))); };
   if (prim == GX_QUADS) {
-    buf.reserve_extra((vtxCount / 4) * 6 * sizeof(u16));
-
-    for (u16 v = 0; v < vtxCount; v += 4) {
-      u16 idx0 = vtxStart + v;
-      u16 idx1 = vtxStart + v + 1;
-      u16 idx2 = vtxStart + v + 2;
-      u16 idx3 = vtxStart + v + 3;
-
-      buf.append(idx0);
-      buf.append(idx1);
-      buf.append(idx2);
-      numIndices += 3;
-
-      buf.append(idx2);
-      buf.append(idx3);
-      buf.append(idx0);
-      numIndices += 3;
+    const u32 quads = vtxCount / 4;
+    u16* idx = out(quads * 6);
+    for (u32 q = 0; q < quads; ++q, idx += 6) {
+      const u16 v = vtxStart + q * 4;
+      idx[0] = v;
+      idx[1] = v + 1;
+      idx[2] = v + 2;
+      idx[3] = v + 2;
+      idx[4] = v + 3;
+      idx[5] = v;
     }
+    return quads * 6;
   } else if (prim == GX_TRIANGLES) {
-    buf.reserve_extra(vtxCount * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      buf.append(idx);
-      ++numIndices;
+    u16* idx = out(vtxCount);
+    for (u32 v = 0; v < vtxCount; ++v) {
+      idx[v] = vtxStart + v;
     }
-  } else if (prim == GX_TRIANGLEFAN) {
-    buf.reserve_extra(((u32(vtxCount) - 3) * 3 + 3) * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      if (v < 3) {
-        buf.append(idx);
-        ++numIndices;
-        continue;
-      }
-      buf.append(std::array{vtxStart, static_cast<u16>(idx - 1), idx});
-      numIndices += 3;
+    return vtxCount;
+  } else if (prim == GX_TRIANGLEFAN || prim == GX_TRIANGLESTRIP) {
+    // The first three vertices as they are, then a triangle per vertex.
+    const u32 head = std::min<u32>(vtxCount, 3);
+    const u32 count = head + (vtxCount - head) * 3;
+    u16* idx = out(count);
+    for (u32 v = 0; v < head; ++v) {
+      *idx++ = vtxStart + v;
     }
-  } else if (prim == GX_TRIANGLESTRIP) {
-    buf.reserve_extra(((static_cast<u32>(vtxCount) - 3) * 3 + 3) * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      if (v < 3) {
-        buf.append(idx);
-        ++numIndices;
-        continue;
-      }
-      if ((v & 1) == 0) {
-        buf.append(std::array{static_cast<u16>(idx - 2), static_cast<u16>(idx - 1), idx});
+    for (u32 v = 3; v < vtxCount; ++v, idx += 3) {
+      const u16 cur = vtxStart + v;
+      if (prim == GX_TRIANGLEFAN) {
+        idx[0] = vtxStart;
+        idx[1] = cur - 1;
       } else {
-        buf.append(std::array{static_cast<u16>(idx - 1), static_cast<u16>(idx - 2), idx});
+        // Strips alternate winding.
+        idx[0] = (v & 1) == 0 ? cur - 2 : cur - 1;
+        idx[1] = (v & 1) == 0 ? cur - 1 : cur - 2;
       }
-      numIndices += 3;
+      idx[2] = cur;
     }
+    return count;
   } else if (prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS) {
-    buf.reserve_extra(6 * sizeof(u16));
-    buf.append<u16>(0);
-    buf.append<u16>(1);
-    buf.append<u16>(3);
-    buf.append<u16>(3);
-    buf.append<u16>(2);
-    buf.append<u16>(0);
-    numIndices = 6;
-  } else
-    UNLIKELY FATAL("unsupported primitive type {}", static_cast<u32>(prim));
-  return numIndices;
+    // One instanced quad.
+    static constexpr u16 Quad[] = {0, 1, 3, 3, 2, 0};
+    std::memcpy(out(6), Quad, sizeof(Quad));
+    return 6;
+  }
+  UNLIKELY FATAL("unsupported primitive type {}", static_cast<u32>(prim));
 }
 
 // GX FIFO opcodes - use CP_ prefix to avoid clashing with GXCommandList.h macros
@@ -1790,23 +1773,6 @@ static struct {
   gfx::interp::BlockLayout layout;
 } s_lastDraw;
 
-// The vertex array ranges a draw would bind, or nothing if one of its arrays
-// still has to be uploaded (which would change the ranges).
-static std::optional<BindGroupRanges> uploaded_array_ranges(const std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
-  BindGroupRanges ranges{};
-  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
-    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
-      continue;
-    }
-    const auto& array = g_gxState.arrays[i];
-    if (array.cachedRange.size == 0 || array.cachedRange.size < std::min(array.size, arraySizes[i])) {
-      return std::nullopt;
-    }
-    ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
-  }
-  return ranges;
-}
-
 // Where each indexed attribute's index sits in a vertex of lastVtxFmt, so a
 // draw finds the array extents it reads without walking every attribute of
 // every vertex. Rebuilt with lastVtxSize.
@@ -1820,6 +1786,22 @@ static struct {
   u32 count = 0;
   std::array<IndexedAttr, GX_VA_TEX7 - GX_VA_POS + 1> attrs;
 } s_indexedLayout;
+
+// Whether a lastVtxFmt draw binds exactly the arrays the last draw did, all
+// already uploaded far enough. Only the indexed attributes need checking: with
+// the state clean, the vertex descriptor is the one the last draw was built
+// with, so its other ranges are empty in both.
+static bool arrays_match_last_draw(const std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
+  for (u32 a = 0; a < s_indexedLayout.count; ++a) {
+    const u32 attr = s_indexedLayout.attrs[a].attr;
+    const auto& array = g_gxState.arrays[attr];
+    if (array.cachedRange.size == 0 || array.cachedRange.size < std::min(array.size, arraySizes[attr]) ||
+        array.cachedRange != s_lastDraw.ranges.vaRanges[attr - GX_VA_POS]) {
+      return false;
+    }
+  }
+  return true;
+}
 
 // Draw command handler - parses vertices inline and caches results
 static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
@@ -1916,11 +1898,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   // including the vertex format and the array ranges its uniform block holds.
   DrawData* lastDraw = nullptr;
   if (!g_gxState.stateDirty && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
-      s_lastDraw.frame == gfx::current_frame() && s_lastDraw.fmt == fmt) {
-    const auto ranges = uploaded_array_ranges(arraySizes);
-    if (ranges && *ranges == s_lastDraw.ranges) {
-      lastDraw = gfx::get_last_draw_command<DrawData>();
-    }
+      s_lastDraw.frame == gfx::current_frame() && s_lastDraw.fmt == fmt && arrays_match_last_draw(arraySizes)) {
+    lastDraw = gfx::get_last_draw_command<DrawData>();
   }
   // Merged draws index their vertices with u16.
   const bool canMerge =
@@ -1930,11 +1909,11 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   // than abort. Sizes are upper bounds: strips/fans expand to 3 indices per
   // vertex, and a merge may also convert the previous draw.
   size_t storageBytes = 0;
-  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
-    const auto& array = g_gxState.arrays[i];
-    const u32 requiredSize = std::min(array.size, arraySizes[i]);
-    if ((g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16) &&
-        (array.cachedRange.size < requiredSize || array.cachedRange.size == 0)) {
+  for (u32 a = 0; a < s_indexedLayout.count; ++a) {
+    const u32 attr = s_indexedLayout.attrs[a].attr;
+    const auto& array = g_gxState.arrays[attr];
+    const u32 requiredSize = std::min(array.size, arraySizes[attr]);
+    if (array.cachedRange.size < requiredSize || array.cachedRange.size == 0) {
       storageBytes += requiredSize + 256;
     }
   }

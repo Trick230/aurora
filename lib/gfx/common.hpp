@@ -114,6 +114,15 @@ public:
     m_length += size;
   }
 
+  // Grows by size bytes left for the caller to fill; the pointer lasts until
+  // the next growth.
+  [[nodiscard]] uint8_t* extend(size_t size) {
+    resize(m_length + size, false);
+    uint8_t* out = m_data + m_length;
+    m_length += size;
+    return out;
+  }
+
   void release() {
     if (m_data != nullptr && m_owned) {
       free(m_data);

@@ -643,12 +643,24 @@ void end_color_pass() {
   g_currentRenderPass = UINT32_MAX;
 }
 
+// The GX draw command last pushed, for draws that merge into it. It is still
+// the pass's last command while no other command went in after it (the
+// serial), the same pass is open and the frame has not moved on.
+static struct {
+  gx::DrawData* draw = nullptr;
+  uint64_t serial = 0;
+  uint32_t pass = UINT32_MAX;
+  uint32_t frame = UINT32_MAX;
+} g_lastGxDraw;
+static uint64_t g_commandSerial = 0;
+
 static inline void push_command(CommandType type, const Command::Data& data) {
   if (g_currentRenderPass == UINT32_MAX)
     UNLIKELY {
       Log.warn("Dropping command {}", magic_enum::enum_name(type));
       return;
     }
+  ++g_commandSerial;
   auto& renderPass = current_render_passes()[g_currentRenderPass];
   ASSERT(!renderPass.sealed, "Attempted to append command {} to sealed render pass {}", magic_enum::enum_name(type),
          g_currentRenderPass);
@@ -663,14 +675,11 @@ static inline void push_command(CommandType type, const Command::Data& data) {
 
 template <>
 gx::DrawData* get_last_draw_command() {
-  if (g_currentRenderPass >= current_render_passes().size()) {
+  const auto& last = g_lastGxDraw;
+  if (last.serial != g_commandSerial || last.pass != g_currentRenderPass || last.frame != g_frameIndex) {
     return nullptr;
   }
-  auto& last = current_render_passes()[g_currentRenderPass].commands.back();
-  if (last.type != CommandType::Draw || last.data.draw.type != ShaderType::GX) {
-    return nullptr;
-  }
-  return &last.data.draw.gx;
+  return last.draw;
 }
 
 static void push_draw_command(ShaderDrawCommand data) {
@@ -930,7 +939,16 @@ void end_offscreen() {
 
 template <>
 void push_draw_command(gx::DrawData data) {
+  const uint64_t serial = g_commandSerial;
   push_draw_command(ShaderDrawCommand{.type = ShaderType::GX, .gx = data});
+  if (g_commandSerial != serial) {
+    g_lastGxDraw = {
+        .draw = &current_render_passes()[g_currentRenderPass].commands.back().data.draw.gx,
+        .serial = g_commandSerial,
+        .pass = g_currentRenderPass,
+        .frame = g_frameIndex,
+    };
+  }
 }
 
 #ifdef AURORA_ENABLE_RMLUI
