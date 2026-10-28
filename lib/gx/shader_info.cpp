@@ -2,7 +2,6 @@
 
 #include <cmath>
 
-#include <tracy/Tracy.hpp>
 
 namespace aurora::gx {
 // TODO: remove, just for testing
@@ -179,7 +178,6 @@ void alpha_arg_reg_info(GXTevAlphaArg arg, const TevStage& stage, ShaderInfo& in
 } // namespace
 
 ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
-  ZoneScoped;
 
   ShaderInfo info{
       // vtx_start, current_pnmtx, render/logical viewport size, array_start, pad, proj
@@ -376,7 +374,6 @@ static u32 line_texcoord_mask() noexcept {
 
 gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
                          gfx::interp::BlockLayout* layout) noexcept {
-  ZoneScoped;
 
   static ByteBuffer buf;
   buf.clear();

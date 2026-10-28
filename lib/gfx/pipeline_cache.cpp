@@ -21,7 +21,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <fmt/format.h>
-#include <tracy/Tracy.hpp>
 
 namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
@@ -401,7 +400,6 @@ template <typename PipelineConfig>
 static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& config, NewPipelineCallback&& cb,
                                       PipelinePriority priority = PipelinePriority::Normal,
                                       std::optional<uint32_t> firstFrameUsedOverride = std::nullopt) {
-  ZoneScoped;
 
   // GXRuntime recomp patch (0006): draws are silently skipped while their
   // pipeline compiles (bind_pipeline returns false), which makes cold and
@@ -855,9 +853,6 @@ static bool write_pipeline_cache_record(const PipelineCacheWrite& write) {
 }
 
 static void pipeline_cache_writer() {
-#ifdef TRACY_ENABLE
-  tracy::SetThreadName("Pipeline cache writer thread");
-#endif
 
   while (true) {
     std::deque<PipelineCacheWrite> batch;
@@ -899,9 +894,6 @@ static void pipeline_cache_writer() {
 }
 
 static void pipeline_worker() {
-#ifdef TRACY_ENABLE
-  tracy::SetThreadName("Pipeline compilation thread");
-#endif
 
   bool hasMore = false;
   while (true) {

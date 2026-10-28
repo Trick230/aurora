@@ -225,27 +225,5 @@ else ()
   target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
 endif ()
 
-if (NOT TARGET TracyClient)
-  message(STATUS "aurora: Fetching Tracy")
-
-  # Default to off, users can enable the cache variable if they want to use it.
-  set(TRACY_ENABLE OFF CACHE BOOL "Enable Tracy profiling")
-  set(TRACY_ON_DEMAND ON CACHE BOOL "On-demand profiling")
-  set(TRACY_STATIC ON CACHE BOOL "Whether to build Tracy as a static library" FORCE)
-
-  FetchContent_Declare(
-          tracy
-          URL https://github.com/wolfpld/tracy/archive/6789e7d6f9a65ec98926b602097a33a9676d2606.tar.gz
-          URL_HASH SHA256=ebfe4fb50d7c254901979355c80a7d4cd33624aa2ec0fe90b3b238153cd5d69b
-          DOWNLOAD_EXTRACT_TIMESTAMP FALSE
-          EXCLUDE_FROM_ALL
-  )
-  FetchContent_MakeAvailable(tracy)
-
-  if (NOT TARGET TracyClient)
-    message(FATAL_ERROR "Failed to make TracyClient available")
-  endif ()
-endif ()
-
 # Restore BUILD_TESTING setting for the rest of the project
 set(BUILD_TESTING ${_prev_build_testing} CACHE INTERNAL "Build tests" FORCE)

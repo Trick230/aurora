@@ -54,4 +54,3 @@ add_subdirectory(extern)
 
 include(cmake/aurora_core.cmake)
 include(cmake/aurora_gx.cmake)
-include(cmake/aurora_vi.cmake)

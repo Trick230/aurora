@@ -19,20 +19,15 @@
 #include "../gfx/render_worker.hpp"
 #include "../internal.hpp"
 #include "../window.hpp"
-#include "gpu_prof.hpp"
 
 #ifdef WEBGPU_DAWN
 #include "../dawn/BackendBinding.hpp"
-#include "../dawn/TracyPlatform.hpp"
 #include <dawn/native/DawnNative.h>
 #endif
 
 namespace aurora::gx {
 void clear_copy_reuse_cache() noexcept;
 } // namespace aurora::gx
-namespace aurora::gfx {
-void clear_offscreen_cache();
-} // namespace aurora::gfx
 
 namespace aurora::webgpu {
 static Module Log("aurora::gpu");
@@ -50,7 +45,7 @@ TextureWithSampler g_depthBuffer;
 static wgpu::BindGroupLayout g_CopyBindGroupLayout;
 wgpu::RenderPipeline g_CopyPipeline;
 wgpu::BindGroup g_CopyBindGroup;
-static AuroraSampler g_Resampler = SAMPLER_BILINEAR;
+static constexpr AuroraSampler g_Resampler = SAMPLER_BILINEAR;
 static wgpu::BindGroupLayout g_ResampleBindGroupLayout;
 static wgpu::RenderPipeline g_ResamplePipeline;
 static wgpu::Buffer g_ResampleUniformBuffer;
@@ -312,20 +307,6 @@ TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool m
 const TextureWithSampler& present_source() noexcept {
   return g_graphicsConfig.msaaSamples > 1 ? g_frameBufferResolved : g_frameBuffer;
 }
-
-void set_resampler(AuroraSampler sampler) noexcept {
-  switch (sampler) {
-  case SAMPLER_AREA:
-  case SAMPLER_BILINEAR:
-    g_Resampler = sampler;
-    return;
-  default:
-    g_Resampler = SAMPLER_BILINEAR;
-    return;
-  }
-}
-
-AuroraSampler get_resampler() noexcept { return g_Resampler; }
 
 Viewport calculate_present_viewport(uint32_t surface_width, uint32_t surface_height, uint32_t content_width,
                                     uint32_t content_height) noexcept {
@@ -660,7 +641,6 @@ const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& en
       .label = "Present resample render pass",
       .colorAttachmentCount = attachments.size(),
       .colorAttachments = attachments.data(),
-      .timestampWrites = gpu_prof::pass_writes("Present resample"),
   };
   const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
   pass.SetPipeline(g_ResamplePipeline);
@@ -733,9 +713,6 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
     dawnInstanceDescriptor.SetLoggingCallback(wgpu_log);
-#ifdef TRACY_ENABLE
-    dawnInstanceDescriptor.platform = tracy_dawn_platform();
-#endif
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
 #endif
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
@@ -876,11 +853,6 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         }
         requiredFeatures.push_back(feature);
       }
-#ifdef TRACY_ENABLE
-      if (feature == wgpu::FeatureName::TimestampQuery) {
-        requiredFeatures.push_back(feature);
-      }
-#endif
     }
     std::string featureList;
     for (auto featureName : requiredFeatures) {
@@ -1005,7 +977,6 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   };
   create_copy_pipeline();
   create_resample_pipeline();
-  gpu_prof::initialize();
   resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
   g_initialized = true;
   return true;
@@ -1014,7 +985,6 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
 void shutdown() {
   g_initialized = false;
   gfx::gpu_synchronize();
-  gpu_prof::shutdown();
   g_CopyBindGroupLayout = {};
   g_CopyPipeline = {};
   g_CopyBindGroup = {};
@@ -1106,8 +1076,3 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uin
   resize_swapchain_internal(width, height, nativeWidth, nativeHeight, force);
 }
 } // namespace aurora::webgpu
-
-void aurora_enable_vsync(const bool enabled) {
-  aurora::webgpu::g_graphicsConfig.surfaceConfiguration.presentMode = aurora::webgpu::best_present_mode(enabled);
-  aurora::window::push_custom_event(aurora::window::CustomEvent::RefreshSurface);
-}

@@ -13,7 +13,6 @@
 #include <utility>
 
 #include <fmt/format.h>
-#include <tracy/Tracy.hpp>
 #include <webgpu/webgpu_cpp.h>
 
 namespace aurora::gfx {
@@ -55,7 +54,6 @@ bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format)
 
 TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
                                     bool tlut, const char* label) noexcept {
-  ZoneScoped;
 
   auto handle = new_dynamic_texture_2d(width, height, mips, format, label);
   auto& ref = *handle;
@@ -113,7 +111,6 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
 
 TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                      const char* label) noexcept {
-  ZoneScopedS(3);
   const auto wgpuFormat = to_wgpu(gxFormat);
   const wgpu::Extent3D size{
       .width = width,
@@ -147,7 +144,6 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
 }
 
 TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
-  ZoneScoped;
 
   const auto wgpuFormat = webgpu::g_graphicsConfig.surfaceConfiguration.format;
   const wgpu::Extent3D size{
@@ -180,7 +176,6 @@ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, 
 }
 
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
-  ZoneScoped;
 
   const auto wgpuFormat = to_wgpu(gxFormat);
   const wgpu::Extent3D size{
@@ -213,7 +208,6 @@ TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, co
 }
 
 void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
-  ZoneScoped;
 
   ConvertedTexture converted;
   if (ref.gxFormat != InvalidTextureFormat) {

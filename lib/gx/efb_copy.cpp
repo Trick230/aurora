@@ -13,13 +13,9 @@ namespace aurora::gx {
 namespace {
 // The copy's size at the render target's scale.
 aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
-  if (g_gxState.viewportPolicy == AURORA_VIEWPORT_NATIVE) {
-    return {logicalWidth, logicalHeight};
-  }
-
-  const auto [logicalFbWidth, logicalFbHeight] = logical_fb_size();
+  const auto [logicalFbWidth, logicalFbHeight] = EfbSize;
   const auto [targetWidth, targetHeight] = gfx::get_render_target_size();
-  if (logicalFbWidth == 0 || logicalFbHeight == 0 || targetWidth == 0 || targetHeight == 0) {
+  if (targetWidth == 0 || targetHeight == 0) {
     return {logicalWidth, logicalHeight};
   }
 

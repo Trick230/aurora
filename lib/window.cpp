@@ -15,46 +15,27 @@
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_pixels.h>
-#include <tracy/Tracy.hpp>
 
 #include <algorithm>
 #include <atomic>
 #include <vector>
-
-#include "dolphin/vi/vi_internal.hpp"
 
 namespace aurora::window {
 namespace {
 Module Log("aurora::window");
 
 SDL_Window* g_window;
-float g_frameBufferScale = 0.f;
-bool g_frameBufferAspectFit = false;
 bool g_frameOpen = false;
 bool g_resizePending = false;
 AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::atomic_bool g_backgrounded = false;
-std::atomic_bool g_surfaceReady = true;
-bool g_lastPaused = false;
 bool g_gotFocus = false;
 
 bool operator==(const AuroraWindowSize& lhs, const AuroraWindowSize& rhs) {
   return lhs.width == rhs.width && lhs.height == rhs.height && lhs.fb_width == rhs.fb_width &&
          lhs.fb_height == rhs.fb_height && lhs.native_fb_height == rhs.native_fb_height &&
          lhs.native_fb_width == rhs.native_fb_width && lhs.scale == rhs.scale;
-}
-
-Vec2<int> scale_frame_buffer_to_aspect(int w, int h, float scale, float aspect) {
-  if (w <= 0 || h <= 0 || scale <= 0.f || aspect <= 0.f) {
-    return {std::max(w, 1), std::max(h, 1)};
-  }
-  const int baseW = std::max(1, static_cast<int>(std::lround(static_cast<float>(w) * scale)));
-  const int baseH = std::max(1, static_cast<int>(std::lround(static_cast<float>(h) * scale)));
-  if (aspect >= static_cast<float>(w) / static_cast<float>(h)) {
-    return {std::max(1, static_cast<int>(std::lround(static_cast<float>(baseH) * aspect))), baseH};
-  }
-  return {baseW, std::max(1, static_cast<int>(std::lround(static_cast<float>(baseW) / aspect)))};
 }
 
 Vec2<int> fit_frame_buffer_to_aspect(int width, int height, float aspect) {
@@ -77,10 +58,8 @@ void resize_swapchain() noexcept {
   if (size == g_windowSize) {
     return;
   }
-  if (size.scale != g_windowSize.scale) {
-    if (g_windowSize.scale > 0.f) {
-      Log.info("Display scale changed to {}", size.scale);
-    }
+  if (size.scale != g_windowSize.scale && g_windowSize.scale > 0.f) {
+    Log.info("Display scale changed to {}", size.scale);
   }
   g_windowSize = size;
   webgpu::resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height);
@@ -115,65 +94,26 @@ bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
   return true;
 }
 
-void sync_paused() {
-  const bool paused = is_paused();
-  if (g_lastPaused == paused) {
-    return;
-  }
-  g_lastPaused = paused;
-  g_events.push_back(AuroraEvent{
-      .type = paused ? AURORA_PAUSED : AURORA_UNPAUSED,
-  });
-}
-
 void process_event(SDL_Event& event) {
   imgui::process_event(event);
 
   switch (event.type) {
-  case SDL_EVENT_WINDOW_MOVED: {
-    g_events.push_back(AuroraEvent{
-        .type = AURORA_WINDOW_MOVED,
-        .windowPos = {.x = event.window.data1, .y = event.window.data2},
-    });
-    break;
-  }
-  case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: {
+  case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+  case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
     resize_swapchain();
-    g_events.push_back(AuroraEvent{
-        .type = AURORA_DISPLAY_SCALE_CHANGED,
-        .windowSize = get_window_size(),
-    });
     break;
-  }
-  case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: {
-    resize_swapchain();
-    g_events.push_back(AuroraEvent{
-        .type = AURORA_WINDOW_RESIZED,
-        .windowSize = get_window_size(),
-    });
-    break;
-  }
   case SDL_EVENT_QUIT:
     g_events.push_back(AuroraEvent{
         .type = AURORA_EXIT,
     });
     break;
   default:
-    if (event.type == g_sdlCustomEventsStart + CustomEvent::FutureResize) {
-      // Future resize event
-      resize_swapchain();
-      g_events.push_back(AuroraEvent{
-          .type = AURORA_WINDOW_RESIZED,
-          .windowSize = get_window_size(),
-      });
-    } else if (event.type == g_sdlCustomEventsStart + CustomEvent::RefreshSurface) {
-      // Refresh surface (vsync changed)
+    if (event.type == g_sdlCustomEventsStart + CustomEvent::RefreshSurface) {
       webgpu::refresh_surface(false);
     }
     break;
   }
 
-  sync_paused();
   g_events.push_back(AuroraEvent{
       .type = AURORA_SDL_EVENT,
       .sdl = event,
@@ -182,29 +122,18 @@ void process_event(SDL_Event& event) {
 } // namespace
 
 const AuroraEvent* poll_events() {
-  ZoneScoped;
   g_events.clear();
 
   SDL_Event event;
   if (is_paused()) {
-    ZoneScopedN("SDL_WaitEvent (paused)");
     if (SDL_WaitEvent(&event)) {
       process_event(event);
     } else {
       Log.warn("SDL_WaitEvent failed: {}", SDL_GetError());
     }
   }
-  while (true) {
-    bool hasEvent = false;
-    {
-      ZoneScopedN("SDL_PollEvent");
-      hasEvent = SDL_PollEvent(&event);
-    }
-    if (hasEvent) {
-      process_event(event);
-    } else {
-      break;
-    }
+  while (SDL_PollEvent(&event)) {
+    process_event(event);
   }
   g_events.push_back(AuroraEvent{
       .type = AURORA_NONE,
@@ -213,8 +142,7 @@ const AuroraEvent* poll_events() {
 }
 
 bool create_window() {
-  SDL_WindowFlags flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
-  flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
+  SDL_WindowFlags flags = SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
   if (g_config.startFullscreen) {
     flags |= SDL_WINDOW_FULLSCREEN;
   }
@@ -287,26 +215,14 @@ void show_window() {
 }
 
 bool initialize() {
-  /* We don't want to initialize anything input related here, otherwise the add events will get lost to the void */
-  TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight"), "Error setting {}: {}", SDL_HINT_ORIENTATIONS,
-      SDL_GetError());
   TRY(SDL_InitSubSystem(SDL_INIT_EVENTS | SDL_INIT_VIDEO), "Error initializing SDL: {}", SDL_GetError());
-
 #if !defined(_WIN32) && !defined(__APPLE__)
   TRY(SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0"), "Error setting {}: {}",
       SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, SDL_GetError());
 #endif
   TRY(SDL_SetHint(SDL_HINT_SCREENSAVER_INHIBIT_ACTIVITY_NAME, g_config.appName), "Error setting {}: {}",
       SDL_HINT_SCREENSAVER_INHIBIT_ACTIVITY_NAME, SDL_GetError());
-  TRY(SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE_RUMBLE_BRAKE, "1"), "Error setting {}: {}",
-      SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE_RUMBLE_BRAKE, SDL_GetError());
-
   TRY(SDL_DisableScreenSaver(), "Error disabling screensaver: {}", SDL_GetError());
-  if (g_config.allowJoystickBackgroundEvents) {
-    TRY(SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1"), "Error setting {}: {}",
-        SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, SDL_GetError());
-  }
-
   return true;
 }
 
@@ -333,29 +249,12 @@ AuroraWindowSize get_window_size() {
 
   int fb_w = native_fb_w;
   int fb_h = native_fb_h;
-  if (g_frameBufferScale > 0.f) {
-    const auto [baseW, baseH] = vi::configured_fb_size();
-    const auto [scaledW, scaledH] =
-        scale_frame_buffer_to_aspect(static_cast<int>(baseW), static_cast<int>(baseH), g_frameBufferScale,
-                                     static_cast<float>(fb_w) / static_cast<float>(fb_h));
-    fb_w = scaledW;
-    fb_h = scaledH;
-  }
   if (g_config.displayAspect > 0.f) {
     const auto [fitW, fitH] = fit_frame_buffer_to_aspect(fb_w, fb_h, g_config.displayAspect);
     fb_w = fitW;
     fb_h = fitH;
-  } else if (g_frameBufferAspectFit) {
-    const auto [baseW, baseH] = vi::configured_fb_size();
-    if (baseW > 0 && baseH > 0) {
-      const auto [fitW, fitH] =
-          fit_frame_buffer_to_aspect(fb_w, fb_h, static_cast<float>(baseW) / static_cast<float>(baseH));
-      fb_w = fitW;
-      fb_h = fitH;
-    }
   }
 
-  const float scale = SDL_GetWindowDisplayScale(g_window);
   return {
       .width = static_cast<uint32_t>(width),
       .height = static_cast<uint32_t>(height),
@@ -363,7 +262,7 @@ AuroraWindowSize get_window_size() {
       .fb_height = static_cast<uint32_t>(fb_h),
       .native_fb_width = static_cast<uint32_t>(native_fb_w),
       .native_fb_height = static_cast<uint32_t>(native_fb_h),
-      .scale = scale,
+      .scale = SDL_GetWindowDisplayScale(g_window),
   };
 }
 
@@ -385,52 +284,11 @@ bool is_paused() noexcept {
   return g_config.pauseOnFocusLost && ((flags & SDL_WINDOW_INPUT_FOCUS) == 0u || (flags & SDL_WINDOW_MINIMIZED) != 0u);
 }
 
-bool is_presentable() noexcept {
-  return g_window != nullptr && !g_backgrounded.load(std::memory_order_acquire) &&
-         g_surfaceReady.load(std::memory_order_acquire);
-}
-
-void set_surface_ready(bool ready) noexcept { g_surfaceReady.store(ready, std::memory_order_release); }
+bool is_presentable() noexcept { return g_window != nullptr && !g_backgrounded.load(std::memory_order_acquire); }
 
 bool push_custom_event(CustomEvent eventType) {
   SDL_Event event{.type = g_sdlCustomEventsStart + eventType};
   return SDL_PushEvent(&event);
-}
-
-void set_title(const char* title) {
-  TRY_WARN(SDL_SetWindowTitle(g_window, title), "Failed to set window title: {}", SDL_GetError());
-}
-
-void set_fullscreen(bool fullscreen) {
-  TRY_WARN(SDL_SetWindowFullscreen(g_window, fullscreen), "Failed to set window fullscreen: {}", SDL_GetError());
-}
-
-bool get_fullscreen() { return (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) != 0u; }
-
-void set_window_size(uint32_t width, uint32_t height) {
-  TRY_WARN(SDL_RestoreWindow(g_window), "Failed to un-maximize window: {}", SDL_GetError());
-  TRY_WARN(SDL_SetWindowSize(g_window, width, height), "Failed to set window size: {}", SDL_GetError());
-}
-
-void set_window_position(uint32_t x, uint32_t y) {
-  TRY_WARN(SDL_SetWindowPosition(g_window, x, y), "Failed to set window position: {}", SDL_GetError());
-}
-
-void center_window() {
-  TRY_WARN(SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED),
-           "Failed to center window: {}", SDL_GetError());
-}
-
-static void push_future_resize_event() {
-  TRY_WARN(push_custom_event(CustomEvent::FutureResize), "Failed to push SDL event for future resize: {}",
-           SDL_GetError());
-}
-
-void request_frame_buffer_resize() {
-  if (g_window != nullptr) {
-    // Defer so that we don't try to reconfigure the surface in the middle of game logic.
-    push_future_resize_event();
-  }
 }
 
 void set_frame_open(bool open) noexcept {
@@ -439,28 +297,4 @@ void set_frame_open(bool open) noexcept {
     resize_swapchain();
   }
 }
-
-void set_frame_buffer_scale(float scale) {
-  if (scale < 0.f) {
-    scale = 0.f;
-  }
-  if (g_frameBufferScale == scale) {
-    return;
-  }
-  g_frameBufferScale = scale;
-  request_frame_buffer_resize();
-}
-
-void set_frame_buffer_aspect_fit(bool fit) {
-  if (g_frameBufferAspectFit == fit) {
-    return;
-  }
-
-  g_frameBufferAspectFit = fit;
-  request_frame_buffer_resize();
-}
-
-void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, value ? "1" : "0"); }
-
 } // namespace aurora::window
-

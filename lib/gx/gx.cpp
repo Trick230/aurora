@@ -1,7 +1,6 @@
 #include "gx.hpp"
 
 #include "pipeline.hpp"
-#include "../dolphin/vi/vi_internal.hpp"
 #include "../webgpu/gpu.hpp"
 #include "../internal.hpp"
 #include "../gfx/common.hpp"
@@ -14,7 +13,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
-#include <tracy/Tracy.hpp>
 
 #include <atomic>
 #include <bit>
@@ -63,13 +61,6 @@ struct DynamicPaletteEntry {
   u32 tlutDataVersion = 0;
 };
 
-struct CachedTextureEntry {
-  gfx::TextureHandle handle;
-  u32 texDataVersion = 0;
-  u32 tlutObjId = 0;
-  u32 tlutDataVersion = 0;
-};
-
 struct CachedTlutTextureEntry {
   gfx::TextureHandle handle;
   u32 tlutDataVersion = 0;
@@ -78,10 +69,8 @@ struct CachedTlutTextureEntry {
 struct TlutObjectCache {
   CachedTlutTextureEntry tlutTexture;
   absl::flat_hash_map<DynamicPaletteKey, DynamicPaletteEntry> dynamicPaletteTextures;
-  absl::flat_hash_set<u32> staticTextureUsers;
 };
 
-absl::flat_hash_map<u32, CachedTextureEntry> s_textureObjectCaches;
 absl::flat_hash_map<u32, TlutObjectCache> s_tlutObjectCaches;
 std::atomic_bool s_staticTextureCacheClearPending = false;
 
@@ -115,8 +104,6 @@ struct RetailTextureEntry {
 constexpr u32 RetailTextureMaxIdleFrames = 600;
 absl::flat_hash_map<RetailTextureKey, RetailTextureEntry> s_retailTextures;
 u32 s_retailTextureSweepFrame = 0;
-
-bool is_retail_texture(const GXTexObj_& obj) noexcept { return obj.texObjId == 0 && obj.no_cache(); }
 
 template <typename Create>
 gfx::TextureHandle resolve_retail_texture(const GXTexObj_& obj, const GXTlutObj_* tlut, Create&& create) {
@@ -155,10 +142,6 @@ gfx::TextureHandle resolve_retail_texture(const GXTexObj_& obj, const GXTlutObj_
 
 void do_clear_static_texture_cache() noexcept {
   s_retailTextures.clear();
-  s_textureObjectCaches.clear();
-  for (auto& [_, cache] : s_tlutObjectCaches) {
-    cache.staticTextureUsers.clear();
-  }
 }
 
 DynamicPaletteKey make_dynamic_palette_key(const GXTexObj_& obj, const GXState::CopyTextureRef& source) {
@@ -170,39 +153,6 @@ DynamicPaletteKey make_dynamic_palette_key(const GXTexObj_& obj, const GXState::
   };
 }
 
-void clear_texture_dependency(u32 texObjId, u32 tlutObjId) {
-  if (texObjId == 0 || tlutObjId == 0) {
-    return;
-  }
-  if (auto it = s_tlutObjectCaches.find(tlutObjId); it != s_tlutObjectCaches.end()) {
-    it->second.staticTextureUsers.erase(texObjId);
-    if (!it->second.tlutTexture.handle && it->second.dynamicPaletteTextures.empty() &&
-        it->second.staticTextureUsers.empty()) {
-      s_tlutObjectCaches.erase(it);
-    }
-  }
-}
-
-void store_cached_texture(const GXTexObj_& obj, gfx::TextureHandle handle, u32 tlutObjId = 0, u32 tlutDataVersion = 0) {
-  if (obj.texObjId == 0) {
-    return;
-  }
-
-  auto& entry = s_textureObjectCaches[obj.texObjId];
-  if (entry.tlutObjId != tlutObjId) {
-    clear_texture_dependency(obj.texObjId, entry.tlutObjId);
-  }
-
-  entry.handle = std::move(handle);
-  entry.texDataVersion = obj.texDataVersion;
-  entry.tlutObjId = tlutObjId;
-  entry.tlutDataVersion = tlutDataVersion;
-
-  if (tlutObjId != 0) {
-    s_tlutObjectCaches[tlutObjId].staticTextureUsers.insert(obj.texObjId);
-  }
-}
-
 gfx::TextureHandle get_tlut_texture(const GXTlutObj_& tlut) {
   if (tlut.tlutObjId != 0) {
     auto& cache = s_tlutObjectCaches[tlut.tlutObjId];
@@ -210,10 +160,6 @@ gfx::TextureHandle get_tlut_texture(const GXTlutObj_& tlut) {
       return cache.tlutTexture.handle;
     }
     cache.dynamicPaletteTextures.clear();
-    for (const u32 texObjId : cache.staticTextureUsers) {
-      s_textureObjectCaches.erase(texObjId);
-    }
-    cache.staticTextureUsers.clear();
   }
 
   const auto handle = gfx::new_static_texture_2d(
@@ -228,18 +174,8 @@ gfx::TextureHandle get_tlut_texture(const GXTlutObj_& tlut) {
 }
 
 gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
-  ZoneScoped;
   if (s_staticTextureCacheClearPending.exchange(false, std::memory_order_acq_rel)) {
     do_clear_static_texture_cache();
-  }
-
-  if (obj.texObjId != 0) {
-    if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
-      const auto& entry = it->second;
-      if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == 0) {
-        return entry.handle;
-      }
-    }
   }
 
   const auto create = [&obj] {
@@ -255,30 +191,12 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
     return gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
                                       {static_cast<const uint8_t*>(obj.data), UINT32_MAX}, false, nameStr);
   };
-  if (is_retail_texture(obj)) {
-    return resolve_retail_texture(obj, nullptr, create);
-  }
-  gfx::TextureHandle handle = create();
-  if (!obj.no_cache()) {
-    store_cached_texture(obj, handle);
-  }
-  return handle;
+  return resolve_retail_texture(obj, nullptr, create);
 }
 
 gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GXTlutObj_& tlut) {
-  ZoneScoped;
   if (s_staticTextureCacheClearPending.exchange(false, std::memory_order_acq_rel)) {
     do_clear_static_texture_cache();
-  }
-
-  if (obj.texObjId != 0) {
-    if (const auto it = s_textureObjectCaches.find(obj.texObjId); it != s_textureObjectCaches.end()) {
-      const auto& entry = it->second;
-      if (entry.handle && entry.texDataVersion == obj.texDataVersion && entry.tlutObjId == tlut.tlutObjId &&
-          entry.tlutDataVersion == tlut.tlutDataVersion) {
-        return entry.handle;
-      }
-    }
   }
 
   const auto create = [&obj, &tlut]() -> gfx::TextureHandle {
@@ -297,19 +215,11 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
     handle->hasArbitraryMips = converted.hasArbitraryMips;
     return handle;
   };
-  if (is_retail_texture(obj)) {
-    return resolve_retail_texture(obj, &tlut, create);
-  }
-  gfx::TextureHandle handle = create();
-  if (!obj.no_cache() && !tlut.no_cache()) {
-    store_cached_texture(obj, handle, tlut.tlutObjId, tlut.tlutDataVersion);
-  }
-  return handle;
+  return resolve_retail_texture(obj, &tlut, create);
 }
 
 gfx::TextureHandle resolve_dynamic_palette_texture(const GXTexObj_& obj, const GXState::CopyTextureRef& source,
                                                    const GXTlutObj_& tlut) {
-  ZoneScoped;
 
   const auto tlutHandle = get_tlut_texture(tlut);
   auto& tlutCache = s_tlutObjectCaches[tlut.tlutObjId];
@@ -342,32 +252,12 @@ u32 resolved_format_for_handle(const gfx::TextureHandle& handle) {
   }
   return GX_TF_RGBA8_PC;
 }
-
-template <typename T>
-T round_away_from_zero(float value) noexcept {
-  return static_cast<T>(value < 0.0f ? std::floor(value) : std::ceil(value));
-}
-
-std::pair<f32, f32> polygon_offset_for_cull_mode(GXCullMode cullMode) noexcept {
-  if (cullMode == GX_CULL_FRONT) {
-    return {g_gxState.backOffset, g_gxState.backScale};
-  }
-  return {g_gxState.frontOffset, g_gxState.frontScale};
-}
 } // namespace
 
-Vec2<uint32_t> logical_fb_size() noexcept {
-  return gfx::is_offscreen() ? gfx::get_render_target_size() : vi::configured_fb_size();
-}
-
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept {
-  if (g_gxState.viewportPolicy == AURORA_VIEWPORT_NATIVE) {
-    return logicalViewport;
-  }
-
-  const auto [logicalFbWidth, logicalFbHeight] = logical_fb_size();
+  const auto [logicalFbWidth, logicalFbHeight] = EfbSize;
   const auto [targetWidth, targetHeight] = gfx::get_render_target_size();
-  if (logicalFbWidth == 0 || logicalFbHeight == 0 || targetWidth == 0 || targetHeight == 0) {
+  if (targetWidth == 0 || targetHeight == 0) {
     return logicalViewport;
   }
 
@@ -390,13 +280,9 @@ gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcep
 }
 
 gfx::ClipRect map_logical_scissor(const gfx::ClipRect& logicalScissor) noexcept {
-  if (g_gxState.viewportPolicy == AURORA_VIEWPORT_NATIVE) {
-    return logicalScissor;
-  }
-
-  const auto [logicalFbWidth, logicalFbHeight] = logical_fb_size();
+  const auto [logicalFbWidth, logicalFbHeight] = EfbSize;
   const auto [targetWidth, targetHeight] = gfx::get_render_target_size();
-  if (logicalFbWidth == 0 || logicalFbHeight == 0 || targetWidth == 0 || targetHeight == 0) {
+  if (targetWidth == 0 || targetHeight == 0) {
     return logicalScissor;
   }
 
@@ -445,36 +331,6 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept {
 
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.textures[static_cast<size_t>(id)]; }
 
-void evict_texture_object(u32 texObjId) noexcept {
-  if (const auto it = s_textureObjectCaches.find(texObjId); it != s_textureObjectCaches.end()) {
-    clear_texture_dependency(texObjId, it->second.tlutObjId);
-    s_textureObjectCaches.erase(it);
-  }
-  // If there is a loaded slot with this ID, mark it as no_cache to avoid inserting it when it's resolved.
-  // This also handles the case where the texture was created, loaded, and immediately destroyed before we resolved it.
-  for (auto& obj : g_gxState.loadedTextures) {
-    if (obj.texObjId == texObjId) {
-      obj.set_no_cache(true);
-    }
-  }
-}
-
-void evict_tlut_object(u32 tlutObjId) noexcept {
-  if (const auto it = s_tlutObjectCaches.find(tlutObjId); it != s_tlutObjectCaches.end()) {
-    for (const u32 texObjId : it->second.staticTextureUsers) {
-      s_textureObjectCaches.erase(texObjId);
-    }
-    s_tlutObjectCaches.erase(it);
-  }
-  // If there is a loaded slot with this ID, mark it as no_cache to avoid inserting it when it's resolved.
-  // This also handles the case where the texture was created, loaded, and immediately destroyed before we resolved it.
-  for (auto& obj : g_gxState.loadedTluts) {
-    if (obj.tlutObjId == tlutObjId) {
-      obj.set_no_cache(true);
-    }
-  }
-}
-
 void clear_copy_texture_cache() noexcept {
   g_gxState.copyTextures.clear();
   g_gxState.copyTextureCache.clear();
@@ -490,43 +346,7 @@ void clear_copy_reuse_cache() noexcept { g_gxState.copyTextureCache.clear(); }
 
 void clear_static_texture_cache() noexcept { s_staticTextureCacheClearPending.store(true, std::memory_order_release); }
 
-void evict_copy_texture(const void* dest) noexcept {
-  absl::flat_hash_set<const void*> sourceIdentities;
-  if (const auto it = g_gxState.copyTextures.find(dest); it != g_gxState.copyTextures.end()) {
-    if (it->second.handle) {
-      sourceIdentities.insert(it->second.handle.get());
-    }
-    g_gxState.copyTextures.erase(it);
-  }
-
-  for (auto it = g_gxState.copyTextureCache.begin(); it != g_gxState.copyTextureCache.end();) {
-    if (it->first.dest == dest) {
-      if (it->second.handle) {
-        sourceIdentities.insert(it->second.handle.get());
-      }
-      g_gxState.copyTextureCache.erase(it++);
-    } else {
-      ++it;
-    }
-  }
-
-  if (sourceIdentities.empty()) {
-    return;
-  }
-
-  for (auto& [_, cache] : s_tlutObjectCaches) {
-    for (auto it = cache.dynamicPaletteTextures.begin(); it != cache.dynamicPaletteTextures.end();) {
-      if (sourceIdentities.contains(it->first.sourceIdentity)) {
-        cache.dynamicPaletteTextures.erase(it++);
-      } else {
-        ++it;
-      }
-    }
-  }
-}
-
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {
-  ZoneScoped;
 
   for (u32 i = 0; i < MaxTextures; ++i) {
     if (!info.sampledTextures.test(i)) {
@@ -536,34 +356,13 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
     GXTexObj_ obj = g_gxState.loadedTextures[i];
     recomp::resolve_texture_data(obj);
     auto& textureBind = g_gxState.textures[i];
-    if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
-        obj.texDataVersion == textureBind.texObj.texDataVersion) {
-      // Texture bind unchanged
-      continue;
-    }
 
     gfx::TextureHandle handle;
     const auto copyIt = g_gxState.copyTextures.find(obj.data);
     const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
     if (is_palette_format(obj.format())) {
       GXTlutObj_ recompTlut{};
-      const GXTlutObj_* tlut = nullptr;
-      if (obj.texObjId == 0) {
-        if (recomp::resolve_texture_tlut(i, &recompTlut)) {
-          tlut = &recompTlut;
-        }
-      }
-      if (tlut == nullptr) {
-        const auto tlutIdx = static_cast<size_t>(obj.tlut);
-        if (tlutIdx < g_gxState.loadedTluts.size() && g_gxState.loadedTluts[tlutIdx].data != nullptr) {
-          tlut = &g_gxState.loadedTluts[tlutIdx];
-        }
-      }
-      if (tlut == nullptr) {
-        if (recomp::resolve_texture_tlut(i, &recompTlut)) {
-          tlut = &recompTlut;
-        }
-      }
+      const GXTlutObj_* tlut = recomp::resolve_texture_tlut(i, &recompTlut) ? &recompTlut : nullptr;
       if (tlut != nullptr) {
         if (copyRef != nullptr) {
           handle = resolve_dynamic_palette_texture(obj, *copyRef, *tlut);
@@ -741,19 +540,10 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
 
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept {
-  ZoneScoped;
-  const float depthBias = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetBits);
-  const float depthBiasSlopeScale = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetScaleBits);
-  const float depthBiasClamp = webgpu::g_hasCoreFeatures
-                                   ? std::bit_cast<float>(config.polygonOffsetClampBits)
-                                   : 0.0f;
   const wgpu::DepthStencilState depthStencil{
       .format = g_graphicsConfig.depthFormat,
       .depthWriteEnabled = config.depthCompare && config.depthUpdate,
       .depthCompare = config.depthCompare ? to_compare_function(config.depthFunc) : wgpu::CompareFunction::Always,
-      .depthBias = round_away_from_zero<int32_t>(depthBias),
-      .depthBiasSlopeScale = depthBiasSlopeScale,
-      .depthBiasClamp = depthBiasClamp,
   };
   const auto blendState =
       to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp, config.dstAlpha);
@@ -790,7 +580,6 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
 }
 
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
-  ZoneScoped;
 
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
   config.shaderConfig.fogType = g_gxState.fog.type;
@@ -876,7 +665,6 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
   }
   const auto cullMode = config.shaderConfig.lineMode == 0 ? g_gxState.cullMode : GX_CULL_NONE;
-  const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
   config = {
       .msaaSamples = gfx::get_sample_count(),
       .shaderConfig = config.shaderConfig,
@@ -887,9 +675,6 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       .blendFacDst = g_gxState.blendFacDst,
       .blendOp = g_gxState.blendOp,
       .dstAlpha = g_gxState.dstAlpha,
-      .polygonOffsetBits = std::bit_cast<uint32_t>(polygonOffset),
-      .polygonOffsetScaleBits = std::bit_cast<uint32_t>(polygonOffsetScale),
-      .polygonOffsetClampBits = std::bit_cast<uint32_t>(g_gxState.clamp),
       .depthCompare = g_gxState.depthCompare,
       .depthUpdate = g_gxState.depthUpdate,
       .alphaUpdate = g_gxState.alphaUpdate,
@@ -898,7 +683,6 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
 }
 
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
-  ZoneScoped;
 
   if (!info.sampledTextures.any() && !info.sampledIndTextures.any()) {
     // Don't bother re-binding anything
@@ -1019,10 +803,8 @@ void shutdown() noexcept {
   for (auto& item : g_gxState.textures) {
     item.ref.reset();
   }
-  s_textureObjectCaches.clear();
   s_tlutObjectCaches.clear();
   g_gxState.loadedTextures.fill({});
-  g_gxState.loadedTluts.fill({});
   g_gxState.loadedTmemTluts.fill({});
   g_gxState.loadedTextureTlutValid.fill(false);
   g_gxState.loadedTextureTlutTmemOffsets.fill(0);

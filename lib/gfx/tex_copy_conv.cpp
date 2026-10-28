@@ -3,7 +3,6 @@
 #include "../internal.hpp"
 #include "../gx/gx.hpp"
 #include "../webgpu/gpu.hpp"
-#include "../webgpu/gpu_prof.hpp"
 #include "texture.hpp"
 #include "../gx/gx_fmt.hpp"
 
@@ -563,7 +562,6 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
       .label = "TexCopyConv Pass",
       .colorAttachmentCount = colorAttachments.size(),
       .colorAttachments = colorAttachments.data(),
-      .timestampWrites = webgpu::gpu_prof::pass_writes("EFB copy convert"),
   };
   const auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
   pass.SetPipeline(pipeline);

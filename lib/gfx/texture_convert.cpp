@@ -7,7 +7,6 @@
 #include <array>
 #include <cstring>
 
-#include <tracy/Tracy.hpp>
 
 namespace aurora::gfx {
 static Module Log("aurora::gfx");
@@ -573,7 +572,6 @@ static ByteBuffer BuildRGBA8FromBC1(uint32_t width, uint32_t height, uint32_t mi
 }
 
 ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) {
-  ZoneScoped;
   ByteBuffer converted;
   switch (format) {
     DEFAULT_FATAL("convert_texture: unknown texture format {}", format);

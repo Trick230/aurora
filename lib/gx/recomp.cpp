@@ -91,12 +91,9 @@ bool resolve_texture_data(GXTexObj_& obj) noexcept {
     return false;
   }
   obj.data = data;
-  obj.texObjId = 0;
-  obj.texDataVersion = 0;
   if (retail_texture_has_mips(obj)) {
     obj.flags |= 1u;
   }
-  obj.set_no_cache(true);
   return true;
 }
 

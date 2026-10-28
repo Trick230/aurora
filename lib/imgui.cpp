@@ -18,7 +18,6 @@
 #define IMGUI_IMPL_WEBGPU_BACKEND_DAWN
 #include "backends/imgui_impl_sdl3.h"
 #include "backends/imgui_impl_wgpu.h"
-#include "tracy/Tracy.hpp"
 
 namespace aurora::imgui {
 static float g_scale;
@@ -30,7 +29,6 @@ static bool g_active = false;
 // g_active changes in between.
 static bool g_frameStarted = false;
 
-static std::vector<wgpu::Texture> g_wgpuTextures;
 
 struct DrawData::Impl {
   ImDrawData drawData;
@@ -48,7 +46,6 @@ void create_context() noexcept {
 }
 
 void initialize() noexcept {
-  ZoneScoped;
   ImGui_ImplSDL3_InitForOther(window::get_sdl_window());
   ImGui_ImplWGPU_InitInfo info;
   info.Device = webgpu::g_device.Get();
@@ -60,11 +57,9 @@ bool active() noexcept { return g_active; }
 void set_active(bool active) noexcept { g_active = active; }
 
 void shutdown() noexcept {
-  ZoneScoped;
   ImGui_ImplWGPU_Shutdown();
   ImGui_ImplSDL3_Shutdown();
   ImGui::DestroyContext();
-  g_wgpuTextures.clear();
 }
 
 void process_event(const SDL_Event& event) noexcept {
@@ -73,33 +68,7 @@ void process_event(const SDL_Event& event) noexcept {
   }
 }
 
-bool wants_capture_event(const SDL_Event& event) noexcept {
-  if (!g_active || ImGui::GetCurrentContext() == nullptr) {
-    return false;
-  }
-
-  const ImGuiIO& io = ImGui::GetIO();
-  switch (event.type) {
-  case SDL_EVENT_MOUSE_MOTION:
-  case SDL_EVENT_MOUSE_BUTTON_DOWN:
-  case SDL_EVENT_MOUSE_BUTTON_UP:
-  case SDL_EVENT_MOUSE_WHEEL:
-  case SDL_EVENT_FINGER_DOWN:
-  case SDL_EVENT_FINGER_MOTION:
-  case SDL_EVENT_FINGER_UP:
-  case SDL_EVENT_FINGER_CANCELED:
-    return io.WantCaptureMouse;
-  case SDL_EVENT_KEY_DOWN:
-  case SDL_EVENT_KEY_UP:
-  case SDL_EVENT_TEXT_INPUT:
-    return io.WantCaptureKeyboard || io.WantTextInput;
-  default:
-    return false;
-  }
-}
-
 void new_frame(const AuroraWindowSize& size) noexcept {
-  ZoneScoped;
   g_frameStarted = g_active;
   if (!g_frameStarted) {
     return;
@@ -129,7 +98,6 @@ void new_frame(const AuroraWindowSize& size) noexcept {
 }
 
 DrawData freeze() noexcept {
-  ZoneScoped;
   if (!g_frameStarted) {
     return {};
   }
@@ -150,7 +118,6 @@ DrawData freeze() noexcept {
 }
 
 void render(const wgpu::RenderPassEncoder& pass, const DrawData& drawData) noexcept {
-  ZoneScoped;
 
   if (!drawData.m_impl) {
     return;
@@ -164,92 +131,10 @@ void render(const wgpu::RenderPassEncoder& pass, const DrawData& drawData) noexc
   pass.PopDebugGroup();
 }
 
-static wgpu::Buffer create_texture_upload_buffer(uint32_t width, uint32_t height, const uint8_t* data,
-                                                 uint32_t copyBytesPerRow) {
-  const uint32_t rowBytes = width * 4;
-  const uint64_t uploadSize = static_cast<uint64_t>(copyBytesPerRow) * height;
-  const wgpu::BufferDescriptor desc{
-      .label = "imgui texture upload buffer",
-      .usage = wgpu::BufferUsage::CopySrc,
-      .size = uploadSize,
-      .mappedAtCreation = true,
-  };
-  auto buffer = webgpu::g_device.CreateBuffer(&desc);
-  auto* dst = static_cast<uint8_t*>(buffer.GetMappedRange(0, uploadSize));
-  for (uint32_t row = 0; row < height; ++row) {
-    std::memcpy(dst, data, rowBytes);
-    dst += copyBytesPerRow;
-    data += rowBytes;
-  }
-  buffer.Unmap();
-  return buffer;
-}
-
-static void enqueue_texture_upload(wgpu::Buffer buffer, wgpu::TexelCopyTextureInfo dst,
-                                   wgpu::TexelCopyBufferLayout layout, wgpu::Extent3D size) {
-  gfx::render_worker::enqueue_work([buffer = std::move(buffer), dst = std::move(dst), layout, size] {
-    const wgpu::CommandEncoderDescriptor encoderDesc{
-        .label = "imgui texture upload encoder",
-    };
-    auto encoder = webgpu::g_device.CreateCommandEncoder(&encoderDesc);
-    const wgpu::TexelCopyBufferInfo src{
-        .layout = layout,
-        .buffer = buffer,
-    };
-    encoder.CopyBufferToTexture(&src, &dst, &size);
-    const wgpu::CommandBufferDescriptor commandBufferDesc{
-        .label = "imgui texture upload command buffer",
-    };
-    auto commandBuffer = encoder.Finish(&commandBufferDesc);
-    webgpu::g_queue.Submit(1, &commandBuffer);
-  });
-}
-
-ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* data) noexcept {
-  const wgpu::Extent3D size{
-      .width = width,
-      .height = height,
-      .depthOrArrayLayers = 1,
-  };
-  const wgpu::TextureDescriptor textureDescriptor{
-      .label = "imgui texture",
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = wgpu::TextureFormat::RGBA8Unorm,
-      .mipLevelCount = 1,
-      .sampleCount = 1,
-  };
-  const wgpu::TextureViewDescriptor textureViewDescriptor{
-      .label = "imgui texture view",
-      .format = wgpu::TextureFormat::RGBA8Unorm,
-      .dimension = wgpu::TextureViewDimension::e2D,
-      .mipLevelCount = WGPU_MIP_LEVEL_COUNT_UNDEFINED,
-      .arrayLayerCount = WGPU_ARRAY_LAYER_COUNT_UNDEFINED,
-  };
-  auto texture = webgpu::g_device.CreateTexture(&textureDescriptor);
-  auto textureView = texture.CreateView(&textureViewDescriptor);
-  {
-    const wgpu::TexelCopyTextureInfo dstView{
-        .texture = texture,
-    };
-    const uint32_t copyBytesPerRow = AURORA_ALIGN(width * 4, 256);
-    const wgpu::TexelCopyBufferLayout dataLayout{
-        .bytesPerRow = copyBytesPerRow,
-        .rowsPerImage = height,
-    };
-    enqueue_texture_upload(create_texture_upload_buffer(width, height, data, copyBytesPerRow), dstView, dataLayout, size);
-  }
-  g_wgpuTextures.push_back(texture);
-  return reinterpret_cast<ImTextureID>(textureView.MoveToCHandle());
-}
 } // namespace aurora::imgui
 
 // C bindings
 extern "C" {
-ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void* rgba8) {
-  return aurora::imgui::add_texture(width, height, static_cast<const uint8_t*>(rgba8));
-}
 void aurora_imgui_set_active(bool active) { aurora::imgui::set_active(active); }
 bool aurora_imgui_active() { return aurora::imgui::active(); }
 }

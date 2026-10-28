@@ -325,12 +325,10 @@ struct GXState {
   std::array<TevStage, MaxTevStages> tevStages;
   std::array<gfx::TextureBind, MaxTextures> textures;
   std::array<GXTexObj_, MaxTextures> loadedTextures;
-  std::array<GXTlutObj_, MaxTluts> loadedTluts;
   std::array<GXTlutObj_, MaxTmemTlutOffsets> loadedTmemTluts;
   std::array<bool, MaxTextures> loadedTextureTlutValid{};
   std::array<u16, MaxTextures> loadedTextureTlutTmemOffsets{};
   std::array<GXTlutFmt, MaxTextures> loadedTextureTlutFormats{};
-  AuroraViewportPolicy viewportPolicy = AURORA_VIEWPORT_FIT;
   gfx::Viewport logicalViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};
   gfx::Viewport renderViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};
   gfx::ClipRect logicalScissor{0, 0, 640, 480};
@@ -356,7 +354,6 @@ struct GXState {
   GXTexFmt texCopyFmt;
   u32 texCopyDstWidth = 0;
   u32 texCopyDstHeight = 0;
-  bool texCopyDstWide = false;
   const void* texCopyDest = nullptr;
   u32 texCopyDestPhysical = UINT32_MAX;
   struct CopyTextureKey {
@@ -396,13 +393,6 @@ struct GXState {
   }();
   std::array<u32, 0x1A> xfRegCache;
 
-  // GX2 state
-  f32 frontOffset = 0.0f;
-  f32 frontScale = 0.0f;
-  f32 backOffset = 0.0f;
-  f32 backScale = 0.0f;
-  f32 clamp = 0.0f;
-
   void clearVtxSizeCache() { lastVtxFmt = GX_MAX_VTXFMT; }
 };
 extern GXState g_gxState;
@@ -412,11 +402,9 @@ void initialize() noexcept;
 void shutdown() noexcept;
 void clear_static_texture_cache() noexcept;
 void clear_copy_texture_cache() noexcept;
-void evict_copy_texture(const void* dest) noexcept;
 void clear_copy_reuse_cache() noexcept;
-void evict_texture_object(u32 texObjId) noexcept;
-void evict_tlut_object(u32 tlutObjId) noexcept;
-Vec2<uint32_t> logical_fb_size() noexcept;
+// The game configures VI for a 640x480 EFB once and never changes it.
+constexpr Vec2<uint32_t> EfbSize{640, 480};
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept;
 gfx::ClipRect map_logical_scissor(const gfx::ClipRect& logicalScissor) noexcept;
 void set_logical_viewport(const gfx::Viewport& viewport) noexcept;

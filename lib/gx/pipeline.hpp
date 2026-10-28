@@ -18,7 +18,7 @@ struct DrawData {
   GXCullMode cullMode;
 };
 
-constexpr uint32_t GXPipelineConfigVersion = 16;
+constexpr uint32_t GXPipelineConfigVersion = 17;
 struct PipelineConfig {
   uint32_t version = GXPipelineConfigVersion;
   uint32_t msaaSamples = 1;
@@ -29,9 +29,6 @@ struct PipelineConfig {
   GXBlendFactor blendFacSrc, blendFacDst;
   GXLogicOp blendOp;
   uint32_t dstAlpha;
-  uint32_t polygonOffsetBits;
-  uint32_t polygonOffsetScaleBits;
-  uint32_t polygonOffsetClampBits;
   bool depthCompare, depthUpdate, alphaUpdate, colorUpdate;
 };
 static_assert(std::has_unique_object_representations_v<PipelineConfig>);

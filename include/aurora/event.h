@@ -4,7 +4,6 @@
 #include "aurora.h"
 
 #include <SDL3/SDL_events.h>
-#include <SDL3/SDL_joystick.h>
 
 #ifdef __cplusplus
 #include <cstdint>
@@ -18,20 +17,11 @@ typedef enum {
   AURORA_NONE,
   AURORA_EXIT,
   AURORA_SDL_EVENT,
-  AURORA_WINDOW_MOVED,
-  AURORA_WINDOW_RESIZED,
-  AURORA_PAUSED,
-  AURORA_UNPAUSED,
-  AURORA_DISPLAY_SCALE_CHANGED,
 } AuroraEventType;
 
 struct AuroraEvent {
   AuroraEventType type;
-  union {
-    SDL_Event sdl;
-    AuroraWindowPos windowPos;
-    AuroraWindowSize windowSize;
-  };
+  SDL_Event sdl;
 };
 
 #ifdef __cplusplus

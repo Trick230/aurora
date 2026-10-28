@@ -75,8 +75,6 @@ struct GXTexObj_ {
   u32 mHeight = 0;
   u32 mFormat = aurora::gfx::InvalidTextureFormat;
   GXTlut tlut = GX_TLUT0;
-  u32 texObjId = 0;
-  u32 texDataVersion = 0;
   u8 flags = 0;
 
   static constexpr u32 get_bits(u32 reg, u32 size, u32 shift) noexcept { return (reg >> shift) & ((1u << size) - 1); }
@@ -104,10 +102,6 @@ struct GXTexObj_ {
   float min_lod() const noexcept { return static_cast<float>(get_bits(mode1, 8, 0)) / 16.0f; }
   float max_lod() const noexcept { return static_cast<float>(get_bits(mode1, 8, 8)) / 16.0f; }
 
-  // Custom flag for texture caching
-  bool no_cache() const noexcept { return (flags & 0x80) != 0; }
-  void set_no_cache(bool value) noexcept { flags = value ? flags | 0x80 : flags & ~0x80; }
-
   // Hacky workaround for an instances where incremental IDs are used for GXCopyTex, but the copy tex was invalidated
   // and the texture reference is still present.
   bool has_data() const noexcept { return reinterpret_cast<uintptr_t>(data) >= 0x10000; }
@@ -121,11 +115,6 @@ struct GXTlutObj_ {
   GXTlutFmt format = GX_TL_IA8;
   u32 tlutObjId = 0;
   u32 tlutDataVersion = 0;
-  u8 flags = 0;
-
-  // Custom flag for texture caching
-  bool no_cache() const noexcept { return (flags & 0x80) != 0; }
-  void set_no_cache(bool value) noexcept { flags = value ? flags | 0x80 : flags & ~0x80; }
 };
 static_assert(sizeof(GXTlutObj_) <= sizeof(GXTlutObj), "GXTlutObj too small!");
 

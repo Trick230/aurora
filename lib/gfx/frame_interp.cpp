@@ -30,7 +30,6 @@
 #include <windows.h>
 #endif
 
-#include "tracy/Tracy.hpp"
 
 namespace aurora::gfx {
 const wgpu::BindGroup* interp::g_vertexUniformBindGroup = &g_uniformBindGroup;
@@ -415,7 +414,6 @@ std::vector<std::pair<uint32_t, uint32_t>> g_samples;
 // Draws whose key occurs once in both frames are surely the same object; the
 // camera move is the one most of them agree on, as most of a scene stands still.
 void estimate_camera() {
-  ZoneScoped;
   g_camera = Identity;
   g_curCounts.clear();
   for (const auto& draw : g_cur.draws) {
@@ -845,7 +843,6 @@ bool stands_still(const float* a, const float* b) {
 // Pairs each draw of the newer frame with a draw of the older one and keeps
 // the pairs worth blending.
 void match() {
-  ZoneScoped;
   g_blends.clear();
   g_dirtyBegin = UINT32_MAX;
   g_dirtyEnd = 0;
@@ -1041,7 +1038,6 @@ inline void renormalize(float* m, const float* a, const float* b, float t) {
 
 // Writes the blended uniform stream at t into g_buffer.
 void blend(float t) {
-  ZoneScoped;
   auto* dst = reinterpret_cast<float*>(g_scratch.data());
   const auto* curBase = reinterpret_cast<const float*>(g_cur.uniforms.data());
   // The way back from the newer eye space to the one at t.
@@ -1141,7 +1137,6 @@ constexpr Clock::duration Slack = std::chrono::milliseconds{4};
 
 // Submits the held frame and starts interpolating toward it from base.
 void activate(Clock::time_point base) {
-  ZoneScoped;
   g_next.submit();
   g_next.submit = {};
   g_prev = std::move(g_cur);
@@ -1220,7 +1215,6 @@ float time_at(Clock::time_point shown) {
 
 // Render worker: replays the newest frame at the current time and presents it.
 void present_tick() {
-  ZoneScoped;
   if (!g_cur.replay) {
     return;
   }
@@ -1450,7 +1444,6 @@ bool replaying() noexcept { return g_replaying.load(std::memory_order_relaxed); 
 
 void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, ReplayFn replay, EndFrameCallback present,
                 SubmitFn submit) {
-  ZoneScoped;
   const auto now = Clock::now();
   if (g_lastArrival != Clock::time_point{}) {
     const auto delta = now - g_lastArrival;

@@ -2,10 +2,8 @@
 
 #include "gfx/common.hpp"
 #include "gfx/render_worker.hpp"
-#include "gx/fifo.hpp"
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
-#include "webgpu/gpu_prof.hpp"
 #include <webgpu/webgpu_cpp.h>
 
 #include "internal.hpp"
@@ -14,7 +12,6 @@
 #include <SDL3/SDL_filesystem.h>
 #include <magic_enum.hpp>
 
-#include "tracy/Tracy.hpp"
 
 namespace aurora {
 AuroraConfig g_config;
@@ -89,7 +86,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
   ASSERT(window::initialize(), "Error initializing window");
 
-  g_sdlCustomEventsStart = SDL_RegisterEvents(2);
+  g_sdlCustomEventsStart = SDL_RegisterEvents(1);
   ASSERT(g_sdlCustomEventsStart, "Failed to allocate user events: {}", SDL_GetError());
   ASSERT(window::initialize_event_watch(), "Error initializing SDL event watch");
 
@@ -128,9 +125,6 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   imgui::create_context();
   const auto size = window::get_window_size();
   Log.info("Using framebuffer size {}x{} scale {}", size.fb_width, size.fb_height, size.scale);
-  if (g_config.imGuiInitCallback != nullptr) {
-    g_config.imGuiInitCallback(&size);
-  }
   imgui::initialize();
 
   g_config.desiredBackend = selectedBackend;
@@ -152,12 +146,10 @@ void shutdown() noexcept {
 }
 
 const AuroraEvent* update() noexcept {
-  ZoneScoped;
   return window::poll_events();
 }
 
 bool begin_frame() noexcept {
-  ZoneScoped;
   {
     if (!window::is_presentable()) {
       webgpu::release_surface();
@@ -183,8 +175,6 @@ bool begin_frame() noexcept {
 }
 
 void end_frame() noexcept {
-  ZoneScoped;
-  gx::fifo::drain();
   gfx::finish();
   auto imguiDrawData = imgui::freeze();
 
@@ -199,7 +189,6 @@ void end_frame() noexcept {
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
     {
       if (window::is_presentable() && g_surface) {
-        ZoneScopedN("Acquire texture");
         wgpu::SurfaceTexture surfaceTexture;
         g_surface.GetCurrentTexture(&surfaceTexture);
         surfaceStatus = surfaceTexture.status;
@@ -226,7 +215,6 @@ void end_frame() noexcept {
             .label = "EFB copy render pass",
             .colorAttachmentCount = attachments.size(),
             .colorAttachments = attachments.data(),
-            .timestampWrites = webgpu::gpu_prof::pass_writes("Present blit"),
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         // Copy EFB -> XFB (swapchain)
@@ -250,7 +238,6 @@ void end_frame() noexcept {
             .label = "ImGui render pass",
             .colorAttachmentCount = attachments.size(),
             .colorAttachments = attachments.data(),
-            .timestampWrites = webgpu::gpu_prof::pass_writes("ImGui"),
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
@@ -261,16 +248,12 @@ void end_frame() noexcept {
     } else {
       Log.info("Skipping present; window not presentable");
     }
-    webgpu::gpu_prof::frame_end(encoder);
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
     {
-      ZoneScopedN("Queue Submit");
       g_queue.Submit(1, &buffer);
     }
-    webgpu::gpu_prof::after_submit();
     if (canPresent && g_surface) {
-      ZoneScopedN("Present");
       wgpu::ConvertibleStatus status = wgpu::Status::Error;
       {
         if (window::is_presentable()) {
@@ -278,7 +261,6 @@ void end_frame() noexcept {
         }
       }
       if (status) {
-        gfx::after_present();
       } else {
         Log.warn("Surface present failed");
         webgpu::release_surface();
@@ -310,23 +292,8 @@ void end_frame() noexcept {
         break;
       }
     }
-    gfx::after_submit();
 
-    TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-    TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);
-    TracyPlotConfig("aurora: lastIndexSize", tracy::PlotFormatType::Memory, false, true, 0);
-    TracyPlotConfig("aurora: lastStorageSize", tracy::PlotFormatType::Memory, false, true, 0);
-    TracyPlotConfig("aurora: lastTextureUploadSize", tracy::PlotFormatType::Memory, false, true, 0);
 
-    TracyPlot("aurora: queuedPipelines", static_cast<int64_t>(gfx::g_stats.queuedPipelines));
-    TracyPlot("aurora: createdPipelines", static_cast<int64_t>(gfx::g_stats.createdPipelines));
-    TracyPlot("aurora: drawCallCount", static_cast<int64_t>(gfx::g_stats.drawCallCount));
-    TracyPlot("aurora: mergedDrawCallCount", static_cast<int64_t>(gfx::g_stats.mergedDrawCallCount));
-    TracyPlot("aurora: lastVertSize", static_cast<int64_t>(gfx::g_stats.lastVertSize));
-    TracyPlot("aurora: lastUniformSize", static_cast<int64_t>(gfx::g_stats.lastUniformSize));
-    TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
-    TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
-    TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
   });
   window::set_frame_open(false);
 }
@@ -341,19 +308,3 @@ void aurora_shutdown() { aurora::shutdown(); }
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 void aurora_end_frame() { aurora::end_frame(); }
-AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
-const AuroraBackend* aurora_get_available_backends(size_t* count) {
-  if (count != nullptr) {
-    *count = aurora::PreferredBackendOrder.size();
-  }
-  return aurora::PreferredBackendOrder.data();
-}
-void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
-void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
-void aurora_set_background_input(bool value) {
-  aurora::g_config.allowJoystickBackgroundEvents = value;
-  aurora::window::set_background_input(value);
-}
-void aurora_set_resampler(AuroraSampler sampler) {
-  aurora::webgpu::set_resampler(sampler);
-}

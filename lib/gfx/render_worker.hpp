@@ -61,7 +61,6 @@ class FrameSlotPool {
 public:
   explicit FrameSlotPool(size_t slotCount);
 
-  size_t acquire();
   std::optional<size_t> try_acquire();
   void release(size_t slot);
   void reset();
@@ -69,7 +68,6 @@ public:
 
 private:
   mutable std::mutex m_mutex;
-  std::condition_variable m_cv;
   std::vector<bool> m_freeSlots;
 };
 

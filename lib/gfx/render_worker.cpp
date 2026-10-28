@@ -4,7 +4,6 @@
 #include <atomic>
 #include <chrono>
 
-#include <tracy/Tracy.hpp>
 
 namespace aurora::gfx::render_worker {
 namespace {
@@ -21,7 +20,6 @@ void complete_sync(const std::shared_ptr<SyncState>& sync) {
   if (!sync) {
     return;
   }
-  ZoneScoped;
   {
     std::lock_guard lock{sync->mutex};
     sync->complete = true;
@@ -30,9 +28,6 @@ void complete_sync(const std::shared_ptr<SyncState>& sync) {
 }
 
 void worker_main() {
-#ifdef TRACY_ENABLE
-  tracy::SetThreadName("Aurora render worker");
-#endif
   g_workerThreadId = std::this_thread::get_id();
 
   while (true) {
@@ -46,7 +41,6 @@ void worker_main() {
     }
 
     if (item->work) {
-      ZoneScopedN("QueueItem work");
       item->work();
     }
     complete_sync(item->sync);
@@ -60,7 +54,6 @@ void worker_main() {
 }
 
 void enqueue(QueueItem item) {
-  ZoneScoped;
   if (is_worker_thread()) {
     if (item.work) {
       item.work();
@@ -87,7 +80,6 @@ void enqueue(QueueItem item) {
 BoundedQueue::BoundedQueue(size_t capacity) : m_capacity(capacity) {}
 
 bool BoundedQueue::push(QueueItem item) {
-  ZoneScoped;
   std::unique_lock lock{m_mutex};
   m_notFull.wait(lock, [&] { return m_closed || m_items.size() < m_capacity; });
   if (m_closed) {
@@ -138,25 +130,6 @@ size_t BoundedQueue::size() const {
 
 FrameSlotPool::FrameSlotPool(size_t slotCount) : m_freeSlots(slotCount, true) {}
 
-size_t FrameSlotPool::acquire() {
-  std::unique_lock lock{m_mutex};
-  m_cv.wait(lock, [&] {
-    for (const bool free : m_freeSlots) {
-      if (free) {
-        return true;
-      }
-    }
-    return false;
-  });
-  for (size_t i = 0; i < m_freeSlots.size(); ++i) {
-    if (m_freeSlots[i]) {
-      m_freeSlots[i] = false;
-      return i;
-    }
-  }
-  return 0;
-}
-
 std::optional<size_t> FrameSlotPool::try_acquire() {
   std::lock_guard lock{m_mutex};
   for (size_t i = 0; i < m_freeSlots.size(); ++i) {
@@ -169,21 +142,15 @@ std::optional<size_t> FrameSlotPool::try_acquire() {
 }
 
 void FrameSlotPool::release(size_t slot) {
-  {
-    std::lock_guard lock{m_mutex};
-    if (slot < m_freeSlots.size()) {
-      m_freeSlots[slot] = true;
-    }
+  std::lock_guard lock{m_mutex};
+  if (slot < m_freeSlots.size()) {
+    m_freeSlots[slot] = true;
   }
-  m_cv.notify_one();
 }
 
 void FrameSlotPool::reset() {
-  {
-    std::lock_guard lock{m_mutex};
-    std::fill(m_freeSlots.begin(), m_freeSlots.end(), true);
-  }
-  m_cv.notify_all();
+  std::lock_guard lock{m_mutex};
+  std::fill(m_freeSlots.begin(), m_freeSlots.end(), true);
 }
 
 size_t FrameSlotPool::free_count() const {
@@ -253,7 +220,6 @@ void synchronize() {
     return;
   }
 
-  ZoneScoped;
   auto sync = std::make_shared<SyncState>();
   enqueue({
       .type = ItemType::Sync,

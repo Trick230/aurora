@@ -1,11 +1,8 @@
 #include "common.hpp"
 
 #include "clear.hpp"
-#include "depth_peek.hpp"
-#include "efb_readback.hpp"
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
-#include "../webgpu/gpu_prof.hpp"
 #include "../gx/pipeline.hpp"
 #include "frame_interp.hpp"
 #include "pipeline_cache.hpp"
@@ -28,7 +25,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <magic_enum.hpp>
 
-#include "tracy/Tracy.hpp"
 
 namespace aurora::gfx {
 static Module Log("aurora::gfx");
@@ -37,19 +33,6 @@ using webgpu::g_device;
 using webgpu::g_instance;
 using webgpu::g_queue;
 
-#ifdef AURORA_GFX_DEBUG_GROUPS
-std::vector<std::string> g_debugGroupStack;
-std::vector<std::string> g_debugMarkers;
-#endif
-
-static std::string pass_label(std::string_view kind) {
-#ifdef AURORA_GFX_DEBUG_GROUPS
-  if (!g_debugGroupStack.empty()) {
-    return fmt::format("{} ({})", kind, g_debugGroupStack.back());
-  }
-#endif
-  return std::string{kind};
-}
 
 constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize +
                                        (UseTextureBuffer ? TextureUploadSize : 0);
@@ -76,18 +59,13 @@ enum class CommandType {
   SetViewport,
   SetScissor,
   Draw,
-  DebugMarker,
 };
 struct Command {
   CommandType type;
-#ifdef AURORA_GFX_DEBUG_GROUPS
-  std::vector<std::string> debugGroupStack;
-#endif
   union Data {
     Viewport setViewport;
     ClipRect setScissor;
     ShaderDrawCommand draw;
-    size_t debugMarkerIndex;
   } data;
 };
 } // namespace aurora::gfx
@@ -197,9 +175,7 @@ struct RenderPass {
   bool clearDepth = true;
   bool hasDepth = true;
   bool hasStencil = false;
-  bool offscreen = false;
   bool observable = false;
-  bool captureDepthSnapshot = false;
   bool sealed = false;
   // Targets the EFB formats, so interpolated replays can run its commands
   // from render bundles.
@@ -210,22 +186,9 @@ struct RenderPass {
   bool replayBuilt = false;
 };
 
-struct TextureCopy {
-  wgpu::TexelCopyTextureInfo src;
-  wgpu::TexelCopyTextureInfo dst;
-  wgpu::Extent3D size;
-};
-
-enum class FrameOpType : uint8_t {
-  RenderPass,
-  TextureCopy,
-};
-
 struct FrameOp {
-  FrameOpType type = FrameOpType::RenderPass;
   uint32_t index = 0;
   RenderPass* renderPass = nullptr;
-  TextureCopy* textureCopy = nullptr;
   StagingHighWater highWater;
   std::vector<const TextureUpload*> textureUploads;
 };
@@ -233,7 +196,6 @@ struct FrameOp {
 using RenderPassList = std::deque<RenderPass>;
 struct FramePacket {
   RenderPassList renderPasses;
-  std::deque<TextureCopy> textureCopies;
   std::deque<FrameOp> ops;
   std::deque<TextureUpload> textureUploads;
   ByteBuffer verts;
@@ -261,58 +223,12 @@ static uint64_t g_nextFrameId = 1;
 static render_worker::FrameSlotPool g_frameSlots{FrameSlotCount};
 static render_worker::FrameSlotPool g_stagingSlots{StagingBufferCount};
 static u32 g_currentRenderPass = UINT32_MAX;
-static bool g_inOffscreen = false;
-static std::optional<RenderPass> g_suspendedEfbPass;
-static Viewport g_suspendedEfbViewport;
-static ClipRect g_suspendedEfbScissor;
-static webgpu::TextureWithSampler g_offscreenColor;
-static webgpu::TextureWithSampler g_offscreenDepth;
 static Viewport g_cachedViewport;
 static ClipRect g_cachedScissor;
 
-using PresentClock = std::chrono::steady_clock;
-static constexpr auto PresentFpsWindow = std::chrono::seconds{1};
-static std::mutex g_presentStatsMutex;
-static std::deque<PresentClock::time_point> g_presentTimes;
 static std::atomic_bool g_processEventsQueued = false;
-static std::atomic_int64_t g_lastPresentNs = 0;
-static std::atomic_int64_t g_presentPeriodNs = 0;
-static std::atomic_int64_t g_cpuFrameTimeNs = 0;
-static PresentClock::time_point g_cpuFrameStart;
-static constexpr auto FrameStartSafetyMargin = std::chrono::milliseconds{2};
-static constexpr auto MaxPacingSample = std::chrono::milliseconds{250};
-static constexpr uint32_t PacingEmaWeight = 8;
-
-static int64_t timestamp_ns(PresentClock::time_point time) {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
-}
-
-static int64_t duration_ns(PresentClock::duration duration) {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
-}
-
-static void update_ema(std::atomic_int64_t& value, int64_t sample) {
-  if (sample <= 0 || sample > duration_ns(MaxPacingSample)) {
-    return;
-  }
-
-  int64_t current = value.load(std::memory_order_acquire);
-  while (true) {
-    const int64_t next = current == 0 ? sample : current + (sample - current) / static_cast<int64_t>(PacingEmaWeight);
-    if (value.compare_exchange_weak(current, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
-      return;
-    }
-  }
-}
-
-static void prune_present_times(PresentClock::time_point now) {
-  while (!g_presentTimes.empty() && g_presentTimes.front() + PresentFpsWindow < now) {
-    g_presentTimes.pop_front();
-  }
-}
 
 static void process_events() {
-  ZoneScopedN("ProcessEvents");
   if (g_instance) {
     g_instance.ProcessEvents();
   }
@@ -341,37 +257,6 @@ static void wait_for_gpu_progress(std::chrono::nanoseconds sleepDuration) {
     enqueue_process_events();
   }
   std::this_thread::sleep_for(sleepDuration);
-}
-
-static void pace_frame_start() {
-  ZoneScopedN("Frame start pacing");
-  if (g_frameSlots.free_count() == FrameSlotCount) {
-    return;
-  }
-
-  const int64_t lastPresentNs = g_lastPresentNs.load(std::memory_order_acquire);
-  const int64_t presentPeriodNs = g_presentPeriodNs.load(std::memory_order_acquire);
-  const int64_t cpuFrameTimeNs = g_cpuFrameTimeNs.load(std::memory_order_acquire);
-  if (lastPresentNs == 0 || presentPeriodNs == 0 || cpuFrameTimeNs == 0) {
-    return;
-  }
-
-  const int64_t safetyMarginNs = duration_ns(FrameStartSafetyMargin);
-  const int64_t targetStartNs = lastPresentNs + presentPeriodNs - cpuFrameTimeNs - safetyMarginNs;
-  int64_t nowNs = timestamp_ns(PresentClock::now());
-  if (targetStartNs <= nowNs) {
-    return;
-  }
-
-  const double initialWaitMs = static_cast<double>(targetStartNs - nowNs) / 1'000'000.0;
-  TracyPlot("aurora: frameStartPaceWaitMs", initialWaitMs);
-  while (nowNs < targetStartNs) {
-    const int64_t remainingNs = targetStartNs - nowNs;
-    const auto sleepDuration = remainingNs > 1'000'000 ? std::chrono::milliseconds{1}
-                                                       : std::chrono::nanoseconds{remainingNs};
-    wait_for_gpu_progress(sleepDuration);
-    nowNs = timestamp_ns(PresentClock::now());
-  }
 }
 
 static void map_staging_buffer(size_t slot, bool releaseSlotOnCompletion = false) {
@@ -416,22 +301,6 @@ static void set_efb_targets(RenderPass& pass) {
   pass.hasStencil = false;
 }
 
-struct OffscreenCacheKey {
-  uint32_t width;
-  uint32_t height;
-
-  bool operator==(const OffscreenCacheKey& rhs) const { return width == rhs.width && height == rhs.height; }
-  template <typename H>
-  friend H AbslHashValue(H h, const OffscreenCacheKey& key) {
-    return H::combine(std::move(h), key.width, key.height);
-  }
-};
-struct OffscreenCacheEntry {
-  webgpu::TextureWithSampler color;
-  webgpu::TextureWithSampler depth;
-};
-static absl::flat_hash_map<OffscreenCacheKey, OffscreenCacheEntry> g_offscreenCache;
-
 static FramePacket& current_frame_packet() {
   CHECK(g_recordingFrame != nullptr, "No active frame packet");
   return *g_recordingFrame;
@@ -450,15 +319,10 @@ static StagingHighWater current_high_water(const FramePacket& frame) noexcept {
   };
 }
 
-static FrameOp capture_frame_op(FramePacket& frame, FrameOpType type, uint32_t index) {
+static FrameOp capture_frame_op(FramePacket& frame, uint32_t index) {
   FrameOp op{
-      .type = type,
       .index = index,
-      .renderPass =
-          type == FrameOpType::RenderPass && index < frame.renderPasses.size() ? &frame.renderPasses[index] : nullptr,
-      .textureCopy = type == FrameOpType::TextureCopy && index < frame.textureCopies.size()
-                         ? &frame.textureCopies[index]
-                         : nullptr,
+      .renderPass = index < frame.renderPasses.size() ? &frame.renderPasses[index] : nullptr,
       .highWater = current_high_water(frame),
   };
   op.textureUploads.reserve(op.highWater.textureUploadCount);
@@ -492,7 +356,7 @@ static void enqueue_op(FramePacket& frame, size_t frameSlot, uint32_t opIndex) {
   }
   auto op = frame.ops[opIndex];
   render_worker::enqueue_encode_pass(frame.frameId, opIndex, [frameSlot, op = std::move(op)] {
-    if (op.renderPass == nullptr && op.textureCopy == nullptr) {
+    if (op.renderPass == nullptr) {
       return;
     }
     auto& packet = g_framePackets[frameSlot];
@@ -503,7 +367,7 @@ static void enqueue_op(FramePacket& frame, size_t frameSlot, uint32_t opIndex) {
 static void enqueue_pass(FramePacket& frame, size_t frameSlot, uint32_t passIndex) {
   seal_pass(frame, passIndex);
   const auto opIndex = static_cast<uint32_t>(frame.ops.size());
-  frame.ops.emplace_back(capture_frame_op(frame, FrameOpType::RenderPass, passIndex));
+  frame.ops.emplace_back(capture_frame_op(frame, passIndex));
   enqueue_op(frame, frameSlot, opIndex);
 }
 
@@ -554,81 +418,6 @@ void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32
   queue_texture_upload(TextureUpload{layout, std::move(tex), size, std::move(buffer)});
 }
 
-void queue_texture_copy(wgpu::TexelCopyTextureInfo src, wgpu::TexelCopyTextureInfo dst, wgpu::Extent3D size) {
-  ZoneScoped;
-  auto& frame = current_frame_packet();
-  if (g_currentRenderPass != UINT32_MAX) {
-    enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
-    g_currentRenderPass = UINT32_MAX;
-  }
-
-  const auto copyIndex = static_cast<uint32_t>(frame.textureCopies.size());
-  frame.textureCopies.emplace_back(TextureCopy{
-      .src = std::move(src),
-      .dst = std::move(dst),
-      .size = size,
-  });
-  const auto opIndex = static_cast<uint32_t>(frame.ops.size());
-  frame.ops.emplace_back(capture_frame_op(frame, FrameOpType::TextureCopy, copyIndex));
-  enqueue_op(frame, g_recordingFrameSlot, opIndex);
-}
-
-void begin_color_pass(const ColorPassDescriptor& desc) {
-  ZoneScoped;
-  auto& frame = current_frame_packet();
-  if (g_currentRenderPass != UINT32_MAX) {
-    enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
-  }
-
-  RenderPass pass{
-      .label = desc.label != nullptr ? desc.label : "",
-      .colorView = desc.colorView,
-      .resolveView = desc.resolveView,
-      .depthStencilView = desc.depthStencilView,
-      .targetSize = desc.targetSize,
-      .msaaSamples = desc.sampleCount,
-      .clearColorValue =
-          {
-              static_cast<float>(desc.clearColor.r),
-              static_cast<float>(desc.clearColor.g),
-              static_cast<float>(desc.clearColor.b),
-              static_cast<float>(desc.clearColor.a),
-          },
-      .clearDepthValue = desc.depthClearValue,
-      .colorLoadOp = desc.colorLoadOp,
-      .colorStoreOp = desc.colorStoreOp,
-      .depthLoadOp = desc.depthLoadOp,
-      .depthStoreOp = desc.depthStoreOp,
-      .stencilLoadOp = desc.stencilLoadOp,
-      .stencilStoreOp = desc.stencilStoreOp,
-      .stencilClearValue = desc.stencilClearValue,
-      .clearColor = desc.colorLoadOp == wgpu::LoadOp::Clear,
-      .clearDepth = desc.depthLoadOp == wgpu::LoadOp::Clear,
-      .hasDepth = desc.hasDepth,
-      .hasStencil = desc.hasStencil,
-      .observable = desc.observable,
-      .bundleable = false,
-  };
-  pass.commands.reserve(128);
-  frame.renderPasses.emplace_back(std::move(pass));
-  g_currentRenderPass = static_cast<uint32_t>(frame.renderPasses.size() - 1);
-
-  g_cachedViewport = {0.f, 0.f, static_cast<float>(desc.targetSize.width), static_cast<float>(desc.targetSize.height),
-                      0.f, 1.f};
-  g_cachedScissor = {0, 0, static_cast<int32_t>(desc.targetSize.width), static_cast<int32_t>(desc.targetSize.height)};
-  push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
-  push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
-}
-
-void end_color_pass() {
-  ZoneScoped;
-  if (g_currentRenderPass == UINT32_MAX) {
-    return;
-  }
-  enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
-  g_currentRenderPass = UINT32_MAX;
-}
-
 // The GX draw command last pushed, for draws that merge into it. It is still
 // the pass's last command while no other command went in after it (the
 // serial), the same pass is open and the frame has not moved on.
@@ -652,9 +441,6 @@ static inline void push_command(CommandType type, const Command::Data& data) {
          g_currentRenderPass);
   renderPass.commands.push_back({
       .type = type,
-#ifdef AURORA_GFX_DEBUG_GROUPS
-      .debugGroupStack = g_debugGroupStack,
-#endif
       .data = data,
   });
 }
@@ -728,7 +514,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   // Populate new render pass from previous
   const auto msaaSamples = prevPass.msaaSamples;
   RenderPass newPass{
-      .label = pass_label("EFB"),
+      .label = "EFB",
       .colorView = prevPass.colorView,
       .resolveView = prevPass.resolveView,
       .depthStencilView = prevPass.depthStencilView,
@@ -777,150 +563,14 @@ void queue_palette_conv(tex_palette_conv::ConvRequest req) {
   renderPass.paletteConvs.push_back(std::move(req));
 }
 
-bool is_offscreen() noexcept { return g_inOffscreen; }
-
 uint32_t get_sample_count() noexcept {
   CHECK(g_currentRenderPass != UINT32_MAX, "get_sample_count called outside of a frame");
   return current_render_passes()[g_currentRenderPass].msaaSamples;
 }
 
 void clear_caches() noexcept {
-  g_offscreenCache.clear();
   std::lock_guard lock{g_bindGroupCacheMutex};
   g_cachedBindGroups.clear();
-}
-
-static OffscreenCacheEntry get_offscreen_textures(uint32_t width, uint32_t height) {
-  OffscreenCacheKey key{width, height};
-  if (const auto it = g_offscreenCache.find(key); it != g_offscreenCache.end()) {
-    return it->second;
-  }
-  const auto colorFormat = webgpu::g_graphicsConfig.surfaceConfiguration.format;
-  const wgpu::Extent3D size{width, height, 1};
-  const wgpu::TextureDescriptor colorDesc{
-      .label = "Offscreen Color",
-      .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc |
-               wgpu::TextureUsage::CopyDst,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = colorFormat,
-      .mipLevelCount = 1,
-      .sampleCount = 1,
-  };
-  auto colorTexture = g_device.CreateTexture(&colorDesc);
-  auto colorView = colorTexture.CreateView();
-  webgpu::TextureWithSampler color{
-      .texture = std::move(colorTexture),
-      .view = std::move(colorView),
-      .size = size,
-      .format = colorFormat,
-  };
-  const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
-  const wgpu::TextureDescriptor depthDesc{
-      .label = "Offscreen Depth",
-      .usage = wgpu::TextureUsage::RenderAttachment,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = depthFormat,
-      .mipLevelCount = 1,
-      .sampleCount = 1,
-  };
-  auto depthTexture = g_device.CreateTexture(&depthDesc);
-  auto depthView = depthTexture.CreateView();
-  webgpu::TextureWithSampler depth{
-      .texture = std::move(depthTexture),
-      .view = std::move(depthView),
-      .size = size,
-      .format = depthFormat,
-  };
-  OffscreenCacheEntry entry{
-      .color = std::move(color),
-      .depth = std::move(depth),
-  };
-  auto [insertIt, _] = g_offscreenCache.emplace(key, std::move(entry));
-  return insertIt->second;
-}
-
-void begin_offscreen(uint32_t width, uint32_t height) {
-  ZoneScoped;
-  CHECK(g_currentRenderPass != UINT32_MAX, "begin_offscreen called outside of a frame");
-
-  // If the current EFB pass has no resolve target, its output is unobservable.
-  // Suspend it so that we can resume it after the offscreen pass.
-  if (!g_inOffscreen) {
-    auto& currentPass = current_render_passes()[g_currentRenderPass];
-    if (!currentPass.resolveTarget) {
-      g_suspendedEfbPass = std::move(currentPass);
-      current_render_passes().pop_back();
-      --g_currentRenderPass;
-    } else {
-      enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
-    }
-    g_suspendedEfbViewport = g_cachedViewport;
-    g_suspendedEfbScissor = g_cachedScissor;
-  }
-
-  // Create offscreen textures
-  auto offscreenEntry = get_offscreen_textures(width, height);
-  g_offscreenColor = std::move(offscreenEntry.color);
-  g_offscreenDepth = std::move(offscreenEntry.depth);
-
-  // Start a new pass with offscreen targets
-  RenderPass newPass{
-      .label = pass_label("Offscreen"),
-      .colorView = g_offscreenColor.view,
-      .depthStencilView = g_offscreenDepth.view,
-      .copySourceTexture = g_offscreenColor.texture,
-      .copySourceView = g_offscreenColor.view,
-      .copySourceDepthView = g_offscreenDepth.view,
-      .targetSize = {width, height, 1},
-      .msaaSamples = 1,
-      .clearColorValue = {0.f, 0.f, 0.f, 0.f},
-      .clearDepthValue = gx::UseReversedZ ? 0.f : 1.f,
-      .clearColor = true,
-      .clearDepth = true,
-      .hasDepth = true,
-      .hasStencil = false,
-      .offscreen = true,
-  };
-  current_render_passes().emplace_back(std::move(newPass));
-  ++g_currentRenderPass;
-
-  g_inOffscreen = true;
-
-  g_cachedViewport = {0.f, 0.f, static_cast<float>(width), static_cast<float>(height), 0.f, 1.f};
-  g_cachedScissor = {0, 0, static_cast<int32_t>(width), static_cast<int32_t>(height)};
-  push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
-  push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
-}
-
-void end_offscreen() {
-  ZoneScoped;
-  CHECK(g_inOffscreen, "end_offscreen called without begin_offscreen");
-
-  enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
-
-  g_inOffscreen = false;
-  g_offscreenColor = {};
-  g_offscreenDepth = {};
-
-  // Resume suspended EFB pass, or start a new one (load existing content)
-  if (g_suspendedEfbPass) {
-    current_render_passes().emplace_back(std::move(*g_suspendedEfbPass));
-    g_suspendedEfbPass.reset();
-  } else {
-    auto& pass = current_render_passes().emplace_back();
-    pass.label = pass_label("EFB");
-    pass.clearColor = false;
-    pass.clearDepth = false;
-  }
-  ++g_currentRenderPass;
-  set_efb_targets(current_render_passes()[g_currentRenderPass]);
-
-  g_cachedViewport = g_suspendedEfbViewport;
-  g_cachedScissor = g_suspendedEfbScissor;
-  push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
-  push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
 }
 
 template <>
@@ -945,14 +595,6 @@ PipelineRef pipeline_ref(const gx::PipelineConfig& config) {
 void initialize() {
   g_frameIndex = 0;
   g_processEventsQueued.store(false, std::memory_order_release);
-  g_lastPresentNs.store(0, std::memory_order_release);
-  g_presentPeriodNs.store(0, std::memory_order_release);
-  g_cpuFrameTimeNs.store(0, std::memory_order_release);
-  g_cpuFrameStart = {};
-  {
-    std::lock_guard lock{g_presentStatsMutex};
-    g_presentTimes.clear();
-  }
   render_worker::initialize();
   // This appears to take a while and blocks the render thread for periods of time
   // render_worker::set_event_pump([] {
@@ -960,7 +602,6 @@ void initialize() {
   //     g_instance.ProcessEvents();
   //   }
   // });
-  depth_peek::initialize();
   tex_copy_conv::initialize();
   tex_palette_conv::initialize();
   texture_replacement::initialize();
@@ -1092,16 +733,7 @@ void shutdown() {
   render_worker::synchronize();
   render_worker::shutdown();
   g_processEventsQueued.store(false, std::memory_order_release);
-  g_lastPresentNs.store(0, std::memory_order_release);
-  g_presentPeriodNs.store(0, std::memory_order_release);
-  g_cpuFrameTimeNs.store(0, std::memory_order_release);
-  g_cpuFrameStart = {};
-  {
-    std::lock_guard lock{g_presentStatsMutex};
-    g_presentTimes.clear();
-  }
   shutdown_pipeline_cache();
-  depth_peek::shutdown();
   tex_copy_conv::shutdown();
   tex_palette_conv::shutdown();
   texture_replacement::shutdown();
@@ -1125,14 +757,10 @@ void shutdown() {
   }
   g_recordingFrame = nullptr;
   g_currentRenderPass = UINT32_MAX;
-  g_offscreenCache.clear();
-  g_offscreenColor = {};
-  g_offscreenDepth = {};
   g_staticBindGroup = {};
   g_staticBindGroupLayout = {};
   g_uniformBindGroup = {};
   g_uniformBindGroupLayout = {};
-  g_inOffscreen = false;
   g_frameIndex = UINT32_MAX;
   g_frameSlots.reset();
   g_stagingSlots.reset();
@@ -1142,7 +770,6 @@ void shutdown() {
 }
 
 static bool wait_for_staging_buffer(size_t slot) {
-  ZoneScopedN("Wait for buffer map");
   map_staging_buffer(slot);
   while (true) {
     const auto mappingState = s_mappingStates[slot].load(std::memory_order_acquire);
@@ -1157,13 +784,8 @@ static bool wait_for_staging_buffer(size_t slot) {
 }
 
 static size_t acquire_frame_slot() {
-  ZoneScopedN("Acquire frame slot");
-  const auto waitStart = PresentClock::now();
   while (true) {
     if (const auto slot = g_frameSlots.try_acquire()) {
-      const auto waitDuration = PresentClock::now() - waitStart;
-      const double waitMs = std::chrono::duration<double, std::milli>{waitDuration}.count();
-      TracyPlot("aurora: frameSlotWaitMs", waitMs);
       return *slot;
     }
     wait_for_gpu_progress(std::chrono::microseconds{100});
@@ -1171,7 +793,6 @@ static size_t acquire_frame_slot() {
 }
 
 static std::optional<size_t> acquire_mapped_staging_buffer() {
-  ZoneScopedN("Acquire mapped staging buffer");
   while (true) {
     if (auto slot = g_stagingSlots.try_acquire()) {
       if (wait_for_staging_buffer(*slot)) {
@@ -1185,8 +806,6 @@ static std::optional<size_t> acquire_mapped_staging_buffer() {
 }
 
 bool begin_frame() {
-  ZoneScoped;
-  // pace_frame_start();
   const size_t frameSlot = acquire_frame_slot();
   const auto stagingSlot = acquire_mapped_staging_buffer();
   if (!stagingSlot) {
@@ -1225,11 +844,10 @@ bool begin_frame() {
   g_drawCallCount = 0;
   g_mergedDrawCallCount = 0;
   g_droppedDrawCallCount = 0;
-  g_suspendedEfbPass.reset();
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
-  pass.label = pass_label("EFB");
+  pass.label = "EFB";
   set_efb_targets(pass);
   pass.clearColorValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
@@ -1242,24 +860,19 @@ bool begin_frame() {
   render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
     static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
     g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
-    webgpu::gpu_prof::frame_begin(g_framePackets[frameSlot].encoder);
   });
-  g_cpuFrameStart = PresentClock::now();
   return true;
 }
 
 void finish() {
-  ZoneScoped;
   if (g_recordingFrame == nullptr) {
     return;
   }
-  ASSERT(!g_inOffscreen, "finish called while offscreen rendering is active");
   if (g_currentRenderPass != UINT32_MAX) {
     auto& frame = current_frame_packet();
     frame.uniforms.append_zeroes(gx::MaxUniformSize);
     auto& pass = frame.renderPasses[g_currentRenderPass];
     pass.observable = true;
-    pass.captureDepthSnapshot = true;
     enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
     g_currentRenderPass = UINT32_MAX;
   }
@@ -1277,15 +890,7 @@ static void publish_frame_stats(const AuroraStats& stats) {
 }
 
 void end_frame(EndFrameCallback callback) {
-  ZoneScoped;
-  ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
   ASSERT(g_currentRenderPass == UINT32_MAX, "end_frame called before finish finalized the current render pass");
-  if (g_cpuFrameStart.time_since_epoch().count() != 0) {
-    const auto cpuFrameTime = PresentClock::now() - g_cpuFrameStart;
-    update_ema(g_cpuFrameTimeNs, duration_ns(cpuFrameTime));
-    const double cpuFrameTimeMs = std::chrono::duration<double, std::milli>{cpuFrameTime}.count();
-    TracyPlot("aurora: cpuFrameTimeMs", cpuFrameTimeMs);
-  }
   auto& frame = current_frame_packet();
   frame.stats.drawCallCount = g_drawCallCount;
   frame.stats.mergedDrawCallCount = g_mergedDrawCallCount;
@@ -1305,18 +910,6 @@ void end_frame(EndFrameCallback callback) {
   ++g_frameIndex;
   g_recordingFrame = nullptr;
 
-#if defined(AURORA_GFX_DEBUG_GROUPS)
-  if (!g_debugGroupStack.empty()) {
-    for (auto& it : std::ranges::reverse_view(g_debugGroupStack)) {
-      Log.warn("Debug group was not popped at end of frame: {}", it);
-    }
-    g_debugGroupStack.clear();
-  }
-
-  if (g_debugMarkers.size() > 0) {
-    g_debugMarkers.clear();
-  }
-#endif
 
   const size_t stagingSlot = frame.stagingBuffer;
   render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, callback = std::move(callback)]() mutable {
@@ -1331,7 +924,6 @@ void end_frame(EndFrameCallback callback) {
       // held until then.
       auto retained = std::make_shared<FramePacket>();
       retained->renderPasses = std::move(packet.renderPasses);
-      retained->textureCopies = std::move(packet.textureCopies);
       retained->ops = std::move(packet.ops);
       g_lastUniformShadowSize = packet.uniformShadow.size();
       auto uniforms = std::move(packet.uniformShadow);
@@ -1340,12 +932,9 @@ void end_frame(EndFrameCallback callback) {
       interp::push_frame(
           std::move(uniforms), std::move(draws), [retained](wgpu::CommandEncoder& cmd) { replay_frame(cmd, *retained); },
           std::move(callback), [frameSlot, stagingSlot, encoder = std::move(encoder), stats]() mutable {
-            webgpu::gpu_prof::frame_end(encoder);
             const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Frame command buffer"};
             const auto buffer = encoder.Finish(&cmdBufDescriptor);
             webgpu::g_queue.Submit(1, &buffer);
-            webgpu::gpu_prof::after_submit();
-            after_submit();
             encoder = {};
             publish_frame_stats(stats);
             g_frameSlots.release(frameSlot);
@@ -1375,7 +964,6 @@ static void expire_cached_bind_groups() {
     return;
   }
 
-  ZoneScoped;
   for (auto it = g_cachedBindGroups.begin(); it != g_cachedBindGroups.end();) {
     if (g_frameIndex - it->second.lastUsedFrame > BindGroupCacheRetainFrames) {
       g_cachedBindGroups.erase(it++);
@@ -1421,7 +1009,6 @@ static void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& f
   if (!needs_staging_copy(frame, op)) {
     return;
   }
-  const webgpu::gpu_prof::Zone zone{cmd, "Staging copies"};
   const auto& highWater = op.highWater;
   copy_staging_buffer_range(cmd, frame, frame.copied.verts, highWater.verts, VertexStagingOffset, g_vertexBuffer);
   copy_staging_buffer_range(cmd, frame, frame.copied.uniforms, highWater.uniforms, UniformStagingOffset,
@@ -1450,23 +1037,12 @@ static void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& f
 
 static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op) {
   copy_staging_to_high_water(cmd, frame, op);
-  switch (op.type) {
-  case FrameOpType::RenderPass:
-    if (op.renderPass != nullptr) {
-      render(cmd, frame, *op.renderPass, op.index);
-    }
-    break;
-  case FrameOpType::TextureCopy:
-    if (op.textureCopy != nullptr) {
-      const webgpu::gpu_prof::Zone zone{cmd, "Texture copy"};
-      cmd.CopyTextureToTexture(&op.textureCopy->src, &op.textureCopy->dst, &op.textureCopy->size);
-    }
-    break;
+  if (op.renderPass != nullptr) {
+    render(cmd, frame, *op.renderPass, op.index);
   }
 }
 
 static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex) {
-  ZoneScoped;
   if (!passInfo.sealed) {
     return;
   }
@@ -1474,7 +1050,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
   for (const auto& conv : passInfo.paletteConvs) {
     tex_palette_conv::run(cmd, conv);
   }
-  if (!passInfo.observable && !passInfo.resolveTarget && !passInfo.offscreen) {
+  if (!passInfo.observable && !passInfo.resolveTarget) {
     // Skip intermediate EFB render passes without observable output.
     return;
   }
@@ -1520,16 +1096,11 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
       .colorAttachmentCount = attachments.size(),
       .colorAttachments = attachments.data(),
       .depthStencilAttachment = depthStencilAttachmentPtr,
-      .timestampWrites = webgpu::gpu_prof::pass_writes(label),
   };
 
   auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
   render_pass(pass, frame, passInfo);
   pass.End();
-
-  if (passInfo.captureDepthSnapshot && !interp::replaying()) {
-    depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
-  }
 
   if (passInfo.resolveTarget) {
     const auto& dstSize = passInfo.resolveTarget->size;
@@ -1552,7 +1123,6 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
     } else if (needsScaling) {
       tex_copy_conv::blit(cmd, convReq);
     } else {
-      const webgpu::gpu_prof::Zone zone{cmd, "EFB copy"};
       const wgpu::TexelCopyTextureInfo src{
           .texture = passInfo.copySourceTexture,
           .origin =
@@ -1575,56 +1145,16 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
 }
 
 static void replay_frame(wgpu::CommandEncoder& cmd, FramePacket& frame) {
-  ZoneScoped;
   for (const auto& op : frame.ops) {
-    if (op.type == FrameOpType::RenderPass) {
-      if (op.renderPass != nullptr) {
-        render(cmd, frame, *op.renderPass, op.index);
-      }
-    } else if (op.textureCopy != nullptr) {
-      cmd.CopyTextureToTexture(&op.textureCopy->src, &op.textureCopy->dst, &op.textureCopy->size);
+    if (op.renderPass != nullptr) {
+      render(cmd, frame, *op.renderPass, op.index);
     }
   }
 }
 
 void interp::record_draw(const DrawRecord& record) { current_frame_packet().interpDraws.push_back(record); }
 
-void after_submit() noexcept {
-  depth_peek::after_submit();
-  efb_readback::after_submit();
-}
-
 void gpu_synchronize() { render_worker::synchronize(); }
-
-void after_present() noexcept {
-  const auto now = PresentClock::now();
-  const int64_t nowNs = timestamp_ns(now);
-  const int64_t previousPresentNs = g_lastPresentNs.exchange(nowNs, std::memory_order_acq_rel);
-  if (previousPresentNs != 0) {
-    update_ema(g_presentPeriodNs, nowNs - previousPresentNs);
-    const double presentPeriodMs =
-        static_cast<double>(g_presentPeriodNs.load(std::memory_order_acquire)) / 1'000'000.0;
-    TracyPlot("aurora: presentPeriodMs", presentPeriodMs);
-  }
-  std::lock_guard lock{g_presentStatsMutex};
-  g_presentTimes.push_back(now);
-  prune_present_times(now);
-}
-
-float calculate_fps() noexcept {
-  const auto now = PresentClock::now();
-  std::lock_guard lock{g_presentStatsMutex};
-  prune_present_times(now);
-  if (g_presentTimes.size() < 2) {
-    return 0.f;
-  }
-
-  const auto elapsed = std::chrono::duration<float>(g_presentTimes.back() - g_presentTimes.front()).count();
-  if (elapsed <= 0.f) {
-    return 0.f;
-  }
-  return static_cast<float>(g_presentTimes.size() - 1) / elapsed;
-}
 
 static void encode_command(const wgpu::RenderPassEncoder& pass, const RenderPass& passInfo, const Command& cmd) {
   switch (cmd.type) {
@@ -1654,11 +1184,6 @@ static void encode_command(const wgpu::RenderPassEncoder& pass, const RenderPass
       break;
     }
   } break;
-  case CommandType::DebugMarker: {
-#if defined(AURORA_GFX_DEBUG_GROUPS)
-    pass.InsertDebugMarker(wgpu::StringView(g_debugMarkers[cmd.data.debugMarkerIndex]));
-#endif
-  } break;
   }
 }
 
@@ -1671,7 +1196,6 @@ static void bind_pass_groups(const wgpu::RenderPassEncoder& pass) {
 // Splits the pass's commands into replay steps, recording its GX draws into
 // render bundles once per frame.
 static void build_replay_steps(RenderPass& passInfo) {
-  ZoneScoped;
   const wgpu::TextureFormat colorFormat = webgpu::g_graphicsConfig.surfaceConfiguration.format;
   const wgpu::RenderBundleEncoderDescriptor descriptor{
       .label = "Replay bundle",
@@ -1690,9 +1214,6 @@ static void build_replay_steps(RenderPass& passInfo) {
     }
   };
   for (const auto& cmd : passInfo.commands) {
-    if (cmd.type == CommandType::DebugMarker) {
-      continue;
-    }
     if (cmd.type != CommandType::Draw || cmd.data.draw.type != ShaderType::GX) {
       flush();
       steps.push_back({.kind = ReplayStep::Kind::Command, .command = &cmd});
@@ -1716,7 +1237,6 @@ static void build_replay_steps(RenderPass& passInfo) {
 }
 
 static void replay_pass(const wgpu::RenderPassEncoder& pass, RenderPass& passInfo) {
-  ZoneScoped;
   if (!passInfo.replayBuilt) {
     build_replay_steps(passInfo);
   }
@@ -1743,45 +1263,18 @@ static void replay_pass(const wgpu::RenderPassEncoder& pass, RenderPass& passInf
 }
 
 static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
-  ZoneScoped;
   if (interp::replaying() && passInfo.bundleable) {
     replay_pass(pass, passInfo);
     return;
   }
-#ifdef AURORA_GFX_DEBUG_GROUPS
-  std::vector<std::string> lastDebugGroupStack;
-#endif
 
   // Bind static bind group for the whole pass
   bind_pass_groups(pass);
 
   for (const auto& cmd : passInfo.commands) {
-#ifdef AURORA_GFX_DEBUG_GROUPS
-    {
-      size_t firstDiff = lastDebugGroupStack.size();
-      for (size_t i = 0; i < lastDebugGroupStack.size(); ++i) {
-        if (i >= cmd.debugGroupStack.size() || cmd.debugGroupStack[i] != lastDebugGroupStack[i]) {
-          firstDiff = i;
-          break;
-        }
-      }
-      for (size_t i = firstDiff; i < lastDebugGroupStack.size(); ++i) {
-        pass.PopDebugGroup();
-      }
-      for (size_t i = firstDiff; i < cmd.debugGroupStack.size(); ++i) {
-        pass.PushDebugGroup(cmd.debugGroupStack[i].c_str());
-      }
-      lastDebugGroupStack = cmd.debugGroupStack;
-    }
-#endif
     encode_command(pass, passInfo, cmd);
   }
 
-#ifdef AURORA_GFX_DEBUG_GROUPS
-  for (size_t i = 0; i < lastDebugGroupStack.size(); ++i) {
-    pass.PopDebugGroup();
-  }
-#endif
 }
 
 void render_pass(const wgpu::RenderPassEncoder& pass, u32 idx) {
@@ -1838,13 +1331,7 @@ static Range map(ByteBuffer& target, size_t length, size_t alignment) {
 }
 
 Range push_verts(const uint8_t* data, size_t length, size_t alignment) {
-  ZoneScoped;
   return push(current_frame_packet().verts, data, length, alignment);
-}
-
-Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
-  ZoneScoped;
-  return push(current_frame_packet().indices, data, length, alignment);
 }
 
 ByteBuffer& index_staging(size_t alignment) {
@@ -1860,7 +1347,6 @@ ByteBuffer& index_staging(size_t alignment) {
 }
 
 Range push_uniform(const uint8_t* data, size_t length) {
-  ZoneScoped;
   auto& frame = current_frame_packet();
   const auto range = push(frame.uniforms, data, length, g_cachedLimits.minUniformBufferOffsetAlignment);
   if (interp::enabled()) {
@@ -1872,7 +1358,6 @@ Range push_uniform(const uint8_t* data, size_t length) {
 }
 
 Range push_storage(const uint8_t* data, size_t length) {
-  ZoneScoped;
   return push(current_frame_packet().storage, data, length, g_cachedLimits.minStorageBufferOffsetAlignment);
 }
 
@@ -1930,44 +1415,7 @@ wgpu::Sampler sampler_ref(const wgpu::SamplerDescriptor& descriptor) {
 
 uint32_t align_uniform(uint32_t value) { return AURORA_ALIGN(value, g_cachedLimits.minUniformBufferOffsetAlignment); }
 
-void insert_debug_marker(std::string label) {
-#if defined(AURORA_GFX_DEBUG_GROUPS)
-  auto idx = g_debugMarkers.size();
-  g_debugMarkers.emplace_back(std::move(label));
-  push_command(CommandType::DebugMarker, {.debugMarkerIndex = idx});
-#endif
-}
-
 } // namespace aurora::gfx
-
-void aurora::gfx::push_debug_group(std::string label) {
-#if defined(AURORA_GFX_DEBUG_GROUPS)
-  g_debugGroupStack.push_back(std::move(label));
-#endif
-}
-void push_debug_group(const char* label) {
-#ifdef AURORA_GFX_DEBUG_GROUPS
-  aurora::gfx::g_debugGroupStack.emplace_back(label);
-#endif
-}
-void pop_debug_group() {
-#ifdef AURORA_GFX_DEBUG_GROUPS
-  if (aurora::gfx::g_debugGroupStack.empty()) {
-    aurora::gfx::Log.error("Debug group stack underflowed!");
-    return;
-  }
-
-  aurora::gfx::g_debugGroupStack.pop_back();
-#endif
-}
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::g_stats; }
 
-void aurora_request_framebuffer_readback() { aurora::gfx::efb_readback::request(); }
-
-bool aurora_take_framebuffer_readback(const uint8_t** rgba, uint32_t* width, uint32_t* height) {
-  return aurora::gfx::efb_readback::take(rgba, width, height);
-}
-
-void aurora_pump_framebuffer_readback() { aurora::gfx::enqueue_process_events(); }
-float aurora_get_fps() { return aurora::gfx::calculate_fps(); }

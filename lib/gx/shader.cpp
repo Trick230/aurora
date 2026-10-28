@@ -13,7 +13,6 @@
 #include <string_view>
 #include <utility>
 
-#include "tracy/Tracy.hpp"
 
 namespace aurora::gx {
 using namespace fmt::literals;
@@ -832,7 +831,6 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
 }
 
 std::string build_shader_source(const ShaderConfig& config) noexcept {
-  ZoneScoped;
   const auto hash = xxh3_hash(config);
   const auto info = build_shader_info(config);
   if (EnableDebugPrints && !g_seenShaders.contains(hash)) {
@@ -1958,7 +1956,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
 }
 
 wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
-  ZoneScoped;
   const auto shaderSource = build_shader_source(config);
   const auto hash = xxh3_hash(config);
   wgpu::ShaderSourceWGSL wgslDescriptor{};

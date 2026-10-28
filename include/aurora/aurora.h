@@ -33,11 +33,6 @@ typedef enum {
 } AuroraLogLevel;
 
 typedef struct {
-  int32_t x;
-  int32_t y;
-} AuroraWindowPos;
-
-typedef struct {
   uint32_t width;
   uint32_t height;
 
@@ -69,10 +64,6 @@ typedef struct SDL_Window SDL_Window;
 typedef struct AuroraEvent AuroraEvent;
 
 typedef void (*AuroraLogCallback)(AuroraLogLevel level, const char* module, const char* message, unsigned int len);
-typedef void (*AuroraImGuiInitCallback)(const AuroraWindowSize* size);
-
-#define MEM1_DEFAULT_SIZE = 24 * 1024 * 1024;
-#define ARAM_DEFAULT_SIZE = 16 * 1024 * 1024;
 
 typedef struct {
   const char* appName;
@@ -84,7 +75,6 @@ typedef struct {
   uint16_t maxTextureAnisotropy;
   bool vsync;
   bool startFullscreen;
-  bool allowJoystickBackgroundEvents;
   bool pauseOnFocusLost;
   bool allowTextureDumps;
   bool allowCpuAdapter;
@@ -97,7 +87,6 @@ typedef struct {
   uint32_t iconHeight;
   AuroraLogCallback logCallback;
   AuroraLogLevel logLevel;
-  AuroraImGuiInitCallback imGuiInitCallback;
 
   /*
    * Show the game's frames one frame late and present replays of each with
@@ -128,13 +117,6 @@ const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
 
-void aurora_set_log_level(AuroraLogLevel level);
-void aurora_set_pause_on_focus_lost(bool value);
-void aurora_set_background_input(bool value);
-void aurora_set_resampler(AuroraSampler sampler);
-
-AuroraBackend aurora_get_backend();
-const AuroraBackend* aurora_get_available_backends(size_t* count);
 
 #ifdef __cplusplus
 }
