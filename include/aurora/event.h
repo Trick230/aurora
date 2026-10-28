@@ -20,8 +20,6 @@ typedef enum {
   AURORA_SDL_EVENT,
   AURORA_WINDOW_MOVED,
   AURORA_WINDOW_RESIZED,
-  AURORA_CONTROLLER_ADDED,
-  AURORA_CONTROLLER_REMOVED,
   AURORA_PAUSED,
   AURORA_UNPAUSED,
   AURORA_DISPLAY_SCALE_CHANGED,
@@ -33,7 +31,6 @@ struct AuroraEvent {
     SDL_Event sdl;
     AuroraWindowPos windowPos;
     AuroraWindowSize windowSize;
-    SDL_JoystickID controller;
   };
 };
 

@@ -19,14 +19,9 @@ typedef enum {
 
 typedef enum {
   BACKEND_AUTO,
-  BACKEND_D3D11,
   BACKEND_D3D12,
   BACKEND_METAL,
   BACKEND_VULKAN,
-  BACKEND_OPENGL,
-  BACKEND_OPENGLES,
-  BACKEND_WEBGPU,
-  BACKEND_NULL,
 } AuroraBackend;
 
 typedef enum {
@@ -93,9 +88,6 @@ typedef struct {
   bool pauseOnFocusLost;
   bool allowTextureDumps;
   bool allowCpuAdapter;
-  // The host reads controllers itself: leave SDL's joystick, gamepad, haptic
-  // and sensor subsystems uninitialized, so event polling never scans devices.
-  bool disableInput;
   int32_t windowPosX;
   int32_t windowPosY;
   uint32_t windowWidth;
@@ -106,19 +98,6 @@ typedef struct {
   AuroraLogCallback logCallback;
   AuroraLogLevel logLevel;
   AuroraImGuiInitCallback imGuiInitCallback;
-
-  /*
-   * The size of the GameCube's main memory, or MEM1 on the Wii.
-   * Note that it will not be allocated at the exact 0x80000000 address, as that cannot be guaranteed.
-   * This can be set to 0 to disable allocating this region.
-   */
-  uint32_t mem1Size;
-
-  /*
-   * The size of the GameCube's ARAM, or MEM2 on the Wii.
-   * This can be set to 0 to disable allocating this region.
-   */
-  uint32_t mem2Size;
 
   /*
    * Show the game's frames one frame late and present replays of each with

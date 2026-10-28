@@ -1,10 +1,7 @@
 #include "window.hpp"
 
-#ifdef AURORA_ENABLE_GX
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
-#endif
-#include "input.hpp"
 #include "internal.hpp"
 
 #include <aurora/aurora.h>
@@ -12,7 +9,6 @@
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_properties.h>
-#include <SDL3/SDL_render.h>
 #include <SDL3/SDL_surface.h>
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_init.h>
@@ -21,17 +17,10 @@
 #include <SDL3/SDL_pixels.h>
 #include <tracy/Tracy.hpp>
 
-#if defined(SDL_PLATFORM_ANDROID)
-#include <jni.h>
-extern "C" void Android_LockActivityMutex(void);
-extern "C" void Android_UnlockActivityMutex(void);
-#endif
-
 #include <algorithm>
 #include <atomic>
 #include <vector>
 
-#include "rmlui.hpp"
 #include "dolphin/vi/vi_internal.hpp"
 
 namespace aurora::window {
@@ -39,7 +28,6 @@ namespace {
 Module Log("aurora::window");
 
 SDL_Window* g_window;
-SDL_Renderer* g_renderer;
 float g_frameBufferScale = 0.f;
 bool g_frameBufferAspectFit = false;
 bool g_frameOpen = false;
@@ -47,11 +35,7 @@ bool g_resizePending = false;
 AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::atomic_bool g_backgrounded = false;
-#if defined(SDL_PLATFORM_ANDROID)
-std::atomic_bool g_surfaceReady = false;
-#else
 std::atomic_bool g_surfaceReady = true;
-#endif
 bool g_lastPaused = false;
 bool g_gotFocus = false;
 
@@ -99,14 +83,7 @@ void resize_swapchain() noexcept {
     }
   }
   g_windowSize = size;
-  if (g_renderer != nullptr) {
-    SDL_SetRenderLogicalPresentation(g_renderer, static_cast<int>(size.native_fb_width),
-                                     static_cast<int>(size.native_fb_height), SDL_LOGICAL_PRESENTATION_DISABLED);
-    SDL_SetRenderScale(g_renderer, size.scale, size.scale);
-  }
-#ifdef AURORA_ENABLE_GX
   webgpu::resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height);
-#endif
 }
 
 void set_window_icon() noexcept {
@@ -124,7 +101,7 @@ void set_window_icon() noexcept {
 
 bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
   switch (event->type) {
-#if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_APPLE)
+#if defined(SDL_PLATFORM_APPLE)
   case SDL_EVENT_WINDOW_MINIMIZED:
     g_backgrounded.store(true, std::memory_order_relaxed);
     break;
@@ -150,12 +127,7 @@ void sync_paused() {
 }
 
 void process_event(SDL_Event& event) {
-#ifdef AURORA_ENABLE_GX
   imgui::process_event(event);
-#endif
-#ifdef AURORA_ENABLE_RMLUI
-  rmlui::handle_event(event);
-#endif
 
   switch (event.type) {
   case SDL_EVENT_WINDOW_MOVED: {
@@ -181,25 +153,6 @@ void process_event(SDL_Event& event) {
     });
     break;
   }
-  case SDL_EVENT_GAMEPAD_ADDED: {
-    auto instance = input::add_controller(event.gdevice.which);
-    g_events.push_back(AuroraEvent{
-        .type = AURORA_CONTROLLER_ADDED,
-        .controller = instance,
-    });
-    break;
-  }
-  case SDL_EVENT_GAMEPAD_REMOVED: {
-    input::remove_controller(event.gdevice.which);
-    g_events.push_back(AuroraEvent{
-        .type = AURORA_CONTROLLER_REMOVED,
-        .controller = event.gdevice.which,
-    });
-    break;
-  }
-  case SDL_EVENT_MOUSE_WHEEL:
-    input::set_mouse_scroll(event.wheel.x, event.wheel.y);
-    break;
   case SDL_EVENT_QUIT:
     g_events.push_back(AuroraEvent{
         .type = AURORA_EXIT,
@@ -215,9 +168,7 @@ void process_event(SDL_Event& event) {
       });
     } else if (event.type == g_sdlCustomEventsStart + CustomEvent::RefreshSurface) {
       // Refresh surface (vsync changed)
-#ifdef AURORA_ENABLE_GX
       webgpu::refresh_surface(false);
-#endif
     }
     break;
   }
@@ -235,8 +186,6 @@ const AuroraEvent* poll_events() {
   g_events.clear();
 
   SDL_Event event;
-  // Clear out the previous scroll values to prevent ghost input
-  input::set_mouse_scroll(0, 0);
   if (is_paused()) {
     ZoneScopedN("SDL_WaitEvent (paused)");
     if (SDL_WaitEvent(&event)) {
@@ -263,16 +212,12 @@ const AuroraEvent* poll_events() {
   return g_events.data();
 }
 
-bool create_window(AuroraBackend backend) {
+bool create_window() {
   SDL_WindowFlags flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
-#if TARGET_OS_IOS || TARGET_OS_TV
-  flags |= SDL_WINDOW_FULLSCREEN;
-#else
   flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
   if (g_config.startFullscreen) {
     flags |= SDL_WINDOW_FULLSCREEN;
   }
-#endif
   auto width = static_cast<Sint32>(g_config.windowWidth);
   auto height = static_cast<Sint32>(g_config.windowHeight);
   if (width == 0 || height == 0) {
@@ -310,7 +255,7 @@ bool create_window(AuroraBackend backend) {
       SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, SDL_GetError());
   TRY(SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, flags), "Failed to set {}: {}",
       SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_GetError());
-  TRY(SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, backend != BACKEND_NULL),
+  TRY(SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, true),
       "Failed to set {}: {}", SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, SDL_GetError());
   g_window = SDL_CreateWindowWithProperties(props);
   if (g_window == nullptr) {
@@ -328,28 +273,7 @@ bool create_window(AuroraBackend backend) {
   return true;
 }
 
-bool create_renderer() {
-  if (g_window == nullptr) {
-    return false;
-  }
-  const auto props = SDL_CreateProperties();
-  TRY(SDL_SetPointerProperty(props, SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, g_window), "Failed to set {}: {}",
-      SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, SDL_GetError());
-  TRY(SDL_SetNumberProperty(props, SDL_PROP_RENDERER_CREATE_PRESENT_VSYNC_NUMBER, SDL_RENDERER_VSYNC_ADAPTIVE),
-      "Failed to set {}: {}", SDL_PROP_RENDERER_CREATE_PRESENT_VSYNC_NUMBER, SDL_GetError());
-  g_renderer = SDL_CreateRendererWithProperties(props);
-  if (g_renderer == nullptr) {
-    Log.error("Failed to create renderer: {}", SDL_GetError());
-    return false;
-  }
-  return true;
-}
-
 void destroy_window() {
-  if (g_renderer != nullptr) {
-    SDL_DestroyRenderer(g_renderer);
-    g_renderer = nullptr;
-  }
   if (g_window != nullptr) {
     SDL_DestroyWindow(g_window);
     g_window = nullptr;
@@ -445,8 +369,6 @@ AuroraWindowSize get_window_size() {
 
 SDL_Window* get_sdl_window() { return g_window; }
 
-SDL_Renderer* get_sdl_renderer() { return g_renderer; }
-
 bool is_paused() noexcept {
   if (!is_presentable()) {
     return true;
@@ -469,18 +391,6 @@ bool is_presentable() noexcept {
 }
 
 void set_surface_ready(bool ready) noexcept { g_surfaceReady.store(ready, std::memory_order_release); }
-
-SurfaceLock::SurfaceLock() noexcept {
-#if defined(SDL_PLATFORM_ANDROID)
-  Android_LockActivityMutex();
-#endif
-}
-
-SurfaceLock::~SurfaceLock() {
-#if defined(SDL_PLATFORM_ANDROID)
-  Android_UnlockActivityMutex();
-#endif
-}
 
 bool push_custom_event(CustomEvent eventType) {
   SDL_Event event{.type = g_sdlCustomEventsStart + eventType};
@@ -554,9 +464,3 @@ void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACK
 
 } // namespace aurora::window
 
-#if defined(SDL_PLATFORM_ANDROID)
-extern "C" JNIEXPORT void JNICALL Java_org_libsdl_app_SDLSurface_auroraNativeSetSurfaceReady(JNIEnv*, jclass,
-                                                                                             jboolean ready) {
-  aurora::window::set_surface_ready(ready == JNI_TRUE);
-}
-#endif

@@ -3,12 +3,6 @@
 #include "clear.hpp"
 #include "../fs_helper.hpp"
 #include "../gx/pipeline.hpp"
-#ifdef AURORA_ENABLE_GXCORE
-#include "gxcore_draw.hpp"
-#endif
-#ifdef AURORA_ENABLE_RMLUI
-#include "../rmlui/pipeline.hpp"
-#endif
 #include "../sqlite_utils.hpp"
 #include "../webgpu/gpu.hpp"
 
@@ -61,14 +55,6 @@ struct SdlVfsSqliteFile {
 };
 
 static std::mutex g_pipelineMutex;
-static bool g_hasPipelineThread = false;
-static size_t g_pipelinesPerFrame = 0;
-// For synchronous pipeline fallback (OpenGL)
-#ifdef NDEBUG
-constexpr size_t BuildPipelinesPerFrame = 5;
-#else
-constexpr size_t BuildPipelinesPerFrame = 1;
-#endif
 static std::thread g_pipelineThread;
 static std::atomic_bool g_pipelineThreadEnd = false;
 static std::condition_variable g_pipelineQueueCv;
@@ -400,26 +386,6 @@ static PendingPipeline* touch_pending_pipeline(PipelineRef hash, PipelinePriorit
   return nullptr;
 }
 
-static std::optional<PendingPipeline> take_pending_pipeline(PipelineRef hash) {
-  auto priorityIt = find_pending_pipeline(g_pipelineQueue, hash);
-  if (priorityIt != g_pipelineQueue.end()) {
-    PendingPipeline pending = std::move(*priorityIt);
-    g_pipelineQueue.erase(priorityIt);
-    g_pendingPipelines.erase(hash);
-    return pending;
-  }
-
-  auto backgroundIt = find_pending_pipeline(g_backgroundPipelineQueue, hash);
-  if (backgroundIt != g_backgroundPipelineQueue.end()) {
-    PendingPipeline pending = std::move(*backgroundIt);
-    g_backgroundPipelineQueue.erase(backgroundIt);
-    g_pendingPipelines.erase(hash);
-    return pending;
-  }
-
-  return std::nullopt;
-}
-
 static void notify_pipeline_ready(bool queued) {
   ++createdPipelines;
   if (queued && --queuedPipelines == 0 && g_gpuCachePrunePending.exchange(false, std::memory_order_acq_rel)) {
@@ -460,8 +426,6 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   bool notifyWorker = false;
   bool persist = priority != PipelinePriority::Background;
   bool pipelineReady = false;
-  bool createdPipeline = false;
-  bool queued = false;
   std::optional<PipelineCacheWrite> cacheWrite;
   {
     std::scoped_lock guard{g_pipelineMutex};
@@ -473,47 +437,16 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
         cacheWrite = make_pipeline_cache_write(type, hash, config, firstFrameUsed);
       }
     } else if (g_pendingPipelines.contains(hash)) {
-      if (blocking && !g_hasPipelineThread) {
-        auto pending = take_pending_pipeline(hash);
-        if (pending) {
-          if (firstFrameUsed < pending->firstFrameUsed) {
-            pending->firstFrameUsed = firstFrameUsed;
-            if (persist) {
-              cacheWrite = make_pipeline_cache_write(type, hash, config, firstFrameUsed);
-            }
-          }
-          g_pipelines.try_emplace(hash, CachedPipeline{
-                                            .pipeline = pending->create(),
-                                            .firstFrameUsed = pending->firstFrameUsed,
-                                        });
-          pipelineReady = true;
-          ++g_pipelinesPerFrame;
-          createdPipeline = true;
-          queued = true;
-        }
-      } else {
-        auto* pending = touch_pending_pipeline(hash, priority);
-        if (pending != nullptr && firstFrameUsed < pending->firstFrameUsed) {
-          pending->firstFrameUsed = firstFrameUsed;
-          if (persist) {
-            cacheWrite = make_pipeline_cache_write(type, hash, config, firstFrameUsed);
-          }
-        } else if (pending == nullptr && persist) {
+      auto* pending = touch_pending_pipeline(hash, priority);
+      if (pending != nullptr && firstFrameUsed < pending->firstFrameUsed) {
+        pending->firstFrameUsed = firstFrameUsed;
+        if (persist) {
           cacheWrite = make_pipeline_cache_write(type, hash, config, firstFrameUsed);
         }
-        notifyWorker = priority != PipelinePriority::Background;
-      }
-    } else if (!g_hasPipelineThread && (blocking || g_pipelinesPerFrame < BuildPipelinesPerFrame)) {
-      g_pipelines.try_emplace(hash, CachedPipeline{
-                                        .pipeline = cb(),
-                                        .firstFrameUsed = firstFrameUsed,
-                                    });
-      pipelineReady = true;
-      if (persist) {
+      } else if (pending == nullptr && persist) {
         cacheWrite = make_pipeline_cache_write(type, hash, config, firstFrameUsed);
       }
-      ++g_pipelinesPerFrame;
-      createdPipeline = true;
+      notifyWorker = priority != PipelinePriority::Background;
     } else {
       PendingPipeline pending{
           .hash = hash,
@@ -543,10 +476,6 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   if (cacheWrite) {
     enqueue_pipeline_cache_write(std::move(*cacheWrite));
     cacheWrite.reset();
-  }
-
-  if (createdPipeline) {
-    notify_pipeline_ready(queued);
   }
 
   if (notifyWorker) {
@@ -874,25 +803,6 @@ static void prune_old_pipeline_cache_versions() {
     return;
   }
 
-#ifdef AURORA_ENABLE_RMLUI
-  const auto rmlDelete = fmt::format("DELETE FROM pipeline_cache WHERE type = {} AND config_version < {}",
-                                     underlying(ShaderType::Rml), rmlui::RmlPipelineConfigVersion);
-  ret = sqlite::exec(g_pipelineCacheDb, rmlDelete.c_str());
-  if (ret != SQLITE_OK) {
-    Log.error("Failed to prune RmlUi pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
-    pipeline_cache_abort();
-  }
-#endif
-
-#ifdef AURORA_ENABLE_GXCORE
-  const auto gxcoreDelete = fmt::format("DELETE FROM pipeline_cache WHERE type = {} AND config_version < {}",
-                                        underlying(ShaderType::GXCore), gxcore::GXCorePipelineConfigVersion);
-  ret = sqlite::exec(g_pipelineCacheDb, gxcoreDelete.c_str());
-  if (ret != SQLITE_OK) {
-    Log.error("Failed to prune GXCore pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
-    pipeline_cache_abort();
-  }
-#endif
 }
 
 static bool write_pipeline_cache_record(const PipelineCacheWrite& write) {
@@ -994,18 +904,14 @@ static void pipeline_worker() {
 #endif
 
   bool hasMore = false;
-  while (g_hasPipelineThread || g_pipelinesPerFrame < BuildPipelinesPerFrame) {
+  while (true) {
     PendingPipeline pending;
     {
       std::unique_lock lock{g_pipelineMutex};
-      if (g_hasPipelineThread) {
-        if (!hasMore) {
-          g_pipelineQueueCv.wait(lock, [] {
-            return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
-          });
-        }
-      } else if (g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty()) {
-        return;
+      if (!hasMore) {
+        g_pipelineQueueCv.wait(lock, [] {
+          return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
+        });
       }
       if (g_pipelineThreadEnd) {
         break;
@@ -1023,9 +929,6 @@ static void pipeline_worker() {
                                             });
       g_pendingPipelines.erase(pending.hash);
       hasMore = !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty();
-    }
-    if (!g_hasPipelineThread) {
-      ++g_pipelinesPerFrame;
     }
     notify_pipeline_ready(true);
   }
@@ -1089,18 +992,10 @@ static size_t load_pipeline_cache() {
   }
 
   size_t acceptedRows = 0;
-#ifdef AURORA_ENABLE_RMLUI
-  acceptedRows += load_pipeline_cache_entries<rmlui::PipelineConfig>(ShaderType::Rml, rmlui::RmlPipelineConfigVersion,
-                                                                     rmlui::create_pipeline);
-#endif
   acceptedRows += load_pipeline_cache_entries<clear::PipelineConfig>(
       ShaderType::Clear, clear::ClearPipelineConfigVersion, clear::create_pipeline);
   acceptedRows +=
       load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion, gx::create_pipeline);
-#ifdef AURORA_ENABLE_GXCORE
-  acceptedRows += load_pipeline_cache_entries<gxcore::PipelineConfig>(
-      ShaderType::GXCore, gxcore::GXCorePipelineConfigVersion, gxcore::create_pipeline);
-#endif
   return acceptedRows;
 }
 
@@ -1138,32 +1033,13 @@ PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, New
   return find_pipeline_impl(type, config, std::move(cb));
 }
 
-#ifdef AURORA_ENABLE_RMLUI
-template <>
-PipelineRef find_pipeline(ShaderType type, const rmlui::PipelineConfig& config, NewPipelineCallback&& cb) {
-  return find_pipeline_impl(type, config, std::move(cb), PipelinePriority::Blocking, 0);
-}
-#endif
-
-#ifdef AURORA_ENABLE_GXCORE
-template <>
-PipelineRef find_pipeline(ShaderType type, const gxcore::PipelineConfig& config, NewPipelineCallback&& cb) {
-  return find_pipeline_impl(type, config, std::move(cb));
-}
-#endif
-
 void initialize_pipeline_cache() {
   g_pipelineCacheBroken = false;
   g_pipelineCacheWriterStop = false;
   g_pipelineThreadEnd = false;
   g_gpuCachePrunePending = false;
 
-  if (webgpu::g_backendType == wgpu::BackendType::WebGPU) {
-    g_hasPipelineThread = false;
-  } else {
-    g_hasPipelineThread = true;
-    g_pipelineThread = std::thread(pipeline_worker);
-  }
+  g_pipelineThread = std::thread(pipeline_worker);
 
   const size_t loadedCount = load_pipeline_cache();
   if (!g_pipelineCacheBroken && loadedCount > 0) {
@@ -1176,18 +1052,16 @@ void initialize_pipeline_cache() {
 }
 
 void shutdown_pipeline_cache() {
-  if (g_hasPipelineThread) {
+  if (g_pipelineThread.joinable()) {
     g_pipelineThreadEnd = true;
     g_pipelineQueueCv.notify_all();
     g_pipelineReadyCv.notify_all();
     g_pipelineThread.join();
   }
-  g_hasPipelineThread = false;
 
   stop_pipeline_cache_writer();
   pipeline_cache_abort();
   g_pipelineCacheBroken = false;
-  g_pipelinesPerFrame = 0;
   g_gpuCachePrunePending = false;
   g_pipelines.clear();
   g_pipelineQueue.clear();
@@ -1196,18 +1070,6 @@ void shutdown_pipeline_cache() {
 
   queuedPipelines = 0;
   createdPipelines = 0;
-}
-
-void begin_pipeline_frame() {
-  if (!g_hasPipelineThread) {
-    g_pipelinesPerFrame = 0;
-  }
-}
-
-void end_pipeline_frame() {
-  if (!g_hasPipelineThread) {
-    pipeline_worker();
-  }
 }
 
 bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {

@@ -8,12 +8,6 @@
 #include "../webgpu/gpu_prof.hpp"
 #include "../gx/pipeline.hpp"
 #include "frame_interp.hpp"
-#ifdef AURORA_ENABLE_GXCORE
-#include "gxcore_draw.hpp"
-#endif
-#ifdef AURORA_ENABLE_RMLUI
-#include "../rmlui/pipeline.hpp"
-#endif
 #include "pipeline_cache.hpp"
 #include "render_worker.hpp"
 #include "tex_copy_conv.hpp"
@@ -38,7 +32,6 @@
 
 namespace aurora::gfx {
 static Module Log("aurora::gfx");
-
 
 using webgpu::g_device;
 using webgpu::g_instance;
@@ -77,12 +70,6 @@ struct ShaderDrawCommand {
   union {
     clear::DrawData clear;
     gx::DrawData gx;
-#ifdef AURORA_ENABLE_RMLUI
-    rmlui::DrawData rml;
-#endif
-#ifdef AURORA_ENABLE_GXCORE
-    gxcore::DrawData gxcore;
-#endif
   };
 };
 enum class CommandType {
@@ -222,7 +209,6 @@ struct RenderPass {
   std::vector<ReplayStep> replaySteps;
   bool replayBuilt = false;
 };
-
 
 struct TextureCopy {
   wgpu::TexelCopyTextureInfo src;
@@ -951,38 +937,10 @@ void push_draw_command(gx::DrawData data) {
   }
 }
 
-#ifdef AURORA_ENABLE_RMLUI
-template <>
-void push_draw_command(rmlui::DrawData data) {
-  push_draw_command(ShaderDrawCommand{.type = ShaderType::Rml, .rml = data});
-}
-#endif
-
-#ifdef AURORA_ENABLE_GXCORE
-template <>
-void push_draw_command(gxcore::DrawData data) {
-  push_draw_command(
-      ShaderDrawCommand{.type = ShaderType::GXCore, .gxcore = data});
-}
-
-template <>
-PipelineRef pipeline_ref(const gxcore::PipelineConfig& config) {
-  return find_pipeline(ShaderType::GXCore, config,
-                       [=] { return gxcore::create_pipeline(config); });
-}
-#endif
-
 template <>
 PipelineRef pipeline_ref(const gx::PipelineConfig& config) {
   return find_pipeline(ShaderType::GX, config, [=] { return create_pipeline(config); });
 }
-
-#ifdef AURORA_ENABLE_RMLUI
-template <>
-PipelineRef pipeline_ref(const rmlui::PipelineConfig& config) {
-  return find_pipeline(ShaderType::Rml, config, [=] { return rmlui::create_pipeline(config); });
-}
-#endif
 
 void initialize() {
   g_frameIndex = 0;
@@ -1123,9 +1081,6 @@ void initialize() {
   }
 
   gx::initialize();
-#ifdef AURORA_ENABLE_RMLUI
-  rmlui::initialize_pipeline();
-#endif
   initialize_pipeline_cache();
   if (g_config.frameInterpolation) {
     interp::initialize(g_config.vsync, g_config.presentRate);
@@ -1151,9 +1106,6 @@ void shutdown() {
   tex_palette_conv::shutdown();
   texture_replacement::shutdown();
   gx::shutdown();
-#ifdef AURORA_ENABLE_RMLUI
-  rmlui::shutdown_pipeline();
-#endif
 
   {
     std::lock_guard lock{g_bindGroupCacheMutex};
@@ -1287,7 +1239,6 @@ bool begin_frame() {
   g_cachedScissor = gx::map_logical_scissor(gx::g_gxState.logicalScissor);
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
-  begin_pipeline_frame();
   render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
     static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
     g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
@@ -1351,7 +1302,6 @@ void end_frame(EndFrameCallback callback) {
   for (auto& array : gx::g_gxState.arrays) {
     array.cachedRange = {};
   }
-  end_pipeline_frame();
   ++g_frameIndex;
   g_recordingFrame = nullptr;
 
@@ -1702,16 +1652,6 @@ static void encode_command(const wgpu::RenderPassEncoder& pass, const RenderPass
     case ShaderType::GX:
       gx::render(draw.gx, pass);
       break;
-#ifdef AURORA_ENABLE_RMLUI
-    case ShaderType::Rml:
-      rmlui::render(draw.rml, pass);
-      break;
-#endif
-#ifdef AURORA_ENABLE_GXCORE
-    case ShaderType::GXCore:
-      gxcore::render(draw.gxcore, pass);
-      break;
-#endif
     }
   } break;
   case CommandType::DebugMarker: {

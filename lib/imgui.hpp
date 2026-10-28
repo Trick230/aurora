@@ -30,6 +30,9 @@ private:
 void create_context() noexcept;
 void initialize() noexcept;
 void shutdown() noexcept;
+// Whether a UI is up. While it isn't, frames skip ImGui and its render pass.
+bool active() noexcept;
+void set_active(bool active) noexcept;
 
 void process_event(const SDL_Event& event) noexcept;
 bool wants_capture_event(const SDL_Event& event) noexcept;

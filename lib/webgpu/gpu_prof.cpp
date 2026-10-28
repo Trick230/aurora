@@ -110,15 +110,10 @@ const char* intern_name(std::string_view name) {
 // tracy::GpuContextType not exposed through TracyC.h
 uint8_t tracy_context_type(wgpu::BackendType backend) {
   switch (backend) {
-  case wgpu::BackendType::OpenGL:
-  case wgpu::BackendType::OpenGLES:
-    return 1; // OpenGl
   case wgpu::BackendType::Vulkan:
     return 2; // Vulkan
   case wgpu::BackendType::D3D12:
     return 4; // Direct3D12
-  case wgpu::BackendType::D3D11:
-    return 5; // Direct3D11
   case wgpu::BackendType::Metal:
     return 6; // Metal
   default:

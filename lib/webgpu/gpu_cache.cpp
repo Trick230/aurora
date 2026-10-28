@@ -12,9 +12,6 @@
 
 #include <sqlite3.h>
 #include <fmt/format.h>
-#if defined(AURORA_CACHE_USE_ZSTD)
-#include <zstd.h>
-#endif
 #define XXH_STATIC_LINKING_ONLY
 #include <xxhash.h>
 
@@ -27,9 +24,6 @@ static sqlite3_stmt* store_stmt;
 static bool cache_broken;
 static std::mutex cache_mutex;
 static std::vector<XXH128_hash_t> cache_keys_used;
-#if defined(AURORA_CACHE_USE_ZSTD)
-static std::vector<uint8_t> compress_buffer;
-#endif
 
 constexpr int CACHE_SCHEMA = 2;
 // % of rows pruned to trigger a full VACUUM
@@ -248,23 +242,9 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
     if (value && valueSize == foundSize) {
       loadSucceeded = true;
       if (compressed) {
-#if defined(AURORA_CACHE_USE_ZSTD)
-        const auto compSize = sqlite3_column_bytes(load_stmt, 0);
-        const auto zstdRet = ZSTD_decompress(value, valueSize, foundPtr, compSize);
-        if (ZSTD_isError(zstdRet)) {
-          Log.error("zstd decompression error: {}", ZSTD_getErrorName(zstdRet));
-          foundSize = 0;
-          loadSucceeded = false;
-        } else if (zstdRet != foundSize) {
-          Log.error("zstd decompression size mismatch: expected {}, got {}", foundSize, zstdRet);
-          foundSize = 0;
-          loadSucceeded = false;
-        }
-#else
         Log.error("Cache entry is zstd-compressed but zstd support is disabled");
         foundSize = 0;
         loadSucceeded = false;
-#endif
       } else {
         if (foundSize != 0 && !foundPtr) {
           Log.error("Cache entry is missing raw value data");
@@ -308,29 +288,6 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
   const void* storedValue = value;
   sqlite3_uint64 storedValueSize = valueSize;
   int compressed = 0;
-#if defined(AURORA_CACHE_USE_ZSTD)
-  const auto bound = ZSTD_compressBound(valueSize);
-  if (ZSTD_isError(bound)) {
-    Log.error("Failed to calculate ZSTD_compressBound: {}", ZSTD_getErrorName(bound));
-    return;
-  }
-
-  if (compress_buffer.size() < bound) {
-    compress_buffer.resize(bound);
-  }
-
-  const auto compressRet = ZSTD_compress(compress_buffer.data(), compress_buffer.size(), value, valueSize, 0);
-  if (ZSTD_isError(compressRet)) {
-    Log.error("ZSTD compression error: {}", ZSTD_getErrorName(compressRet));
-    return;
-  }
-
-  if (compressRet < valueSize) {
-    storedValue = compress_buffer.data();
-    storedValueSize = compressRet;
-    compressed = 1;
-  }
-#endif
 
   const auto keyHash = XXH128(key, keySize, 0);
   check(sqlite3_bind_blob64(store_stmt, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT));
@@ -418,9 +375,6 @@ void cache_prune() {
 }
 
 void cache_shutdown() {
-#if defined(AURORA_CACHE_USE_ZSTD)
-  compress_buffer.clear();
-#endif
   cache_keys_used.clear();
   if (load_stmt != nullptr) {
     check(sqlite3_finalize(load_stmt));

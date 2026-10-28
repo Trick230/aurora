@@ -22,8 +22,6 @@ using NewPipelineCallback = std::function<wgpu::RenderPipeline()>;
 
 void initialize_pipeline_cache();
 void shutdown_pipeline_cache();
-void begin_pipeline_frame();
-void end_pipeline_frame();
 
 template <typename Config>
 PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCallback&& cb);

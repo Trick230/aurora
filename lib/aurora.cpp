@@ -1,6 +1,5 @@
 #include <aurora/aurora.h>
 
-#ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
 #include "gfx/render_worker.hpp"
 #include "gx/fifo.hpp"
@@ -8,20 +7,13 @@
 #include "webgpu/gpu.hpp"
 #include "webgpu/gpu_prof.hpp"
 #include <webgpu/webgpu_cpp.h>
-#endif
 
-#ifdef AURORA_ENABLE_RMLUI
-#include "rmlui.hpp"
-#endif
-
-#include "input.hpp"
 #include "internal.hpp"
 #include "window.hpp"
 
 #include <SDL3/SDL_filesystem.h>
 #include <magic_enum.hpp>
 
-#include "system_info.hpp"
 #include "tracy/Tracy.hpp"
 
 namespace aurora {
@@ -32,7 +24,6 @@ char g_gameName[4];
 namespace {
 Module Log("aurora");
 
-#ifdef AURORA_ENABLE_GX
 // GPU
 using webgpu::g_device;
 using webgpu::g_queue;
@@ -54,13 +45,8 @@ void set_present_viewport(const wgpu::RenderPassEncoder& pass, const gfx::Viewpo
   const auto scissorBottom = clamp_scissor_coord(std::ceil(viewport.top + viewport.height), surfaceHeight);
   pass.SetScissorRect(scissorX, scissorY, scissorRight - scissorX, scissorBottom - scissorY);
 }
-#endif
 
-#ifdef AURORA_ENABLE_GX
 constexpr std::array PreferredBackendOrder{
-#ifdef ENABLE_BACKEND_WEBGPU
-    BACKEND_WEBGPU,
-#endif
 #ifdef DAWN_ENABLE_BACKEND_D3D12
     BACKEND_D3D12,
 #endif
@@ -70,29 +56,11 @@ constexpr std::array PreferredBackendOrder{
 #ifdef DAWN_ENABLE_BACKEND_VULKAN
     BACKEND_VULKAN,
 #endif
-#ifdef DAWN_ENABLE_BACKEND_D3D11
-    BACKEND_D3D11,
-#endif
-// #ifdef DAWN_ENABLE_BACKEND_DESKTOP_GL
-//     BACKEND_OPENGL,
-// #endif
-#ifdef DAWN_ENABLE_BACKEND_OPENGLES
-    BACKEND_OPENGLES,
-#endif
-#ifdef DAWN_ENABLE_BACKEND_NULL
-    BACKEND_NULL,
-#endif
 };
-#else
-constexpr std::array<AuroraBackend, 0> PreferredBackendOrder{};
-#endif
-
-bool g_initialFrame = false;
 
 AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexcept {
   g_config = config;
   Log.info("Aurora initializing");
-  log_system_information();
   if (g_config.appName == nullptr) {
     g_config.appName = "Aurora";
   } else {
@@ -125,11 +93,10 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   ASSERT(g_sdlCustomEventsStart, "Failed to allocate user events: {}", SDL_GetError());
   ASSERT(window::initialize_event_watch(), "Error initializing SDL event watch");
 
-#ifdef AURORA_ENABLE_GX
   /* Attempt to create a window using the calling application's desired backend */
   AuroraBackend selectedBackend = config.desiredBackend;
   bool windowCreated = false;
-  if (selectedBackend != BACKEND_AUTO && window::create_window(selectedBackend)) {
+  if (selectedBackend != BACKEND_AUTO && window::create_window()) {
     if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
       windowCreated = true;
     } else {
@@ -140,7 +107,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   if (!windowCreated) {
     for (const auto backendType : PreferredBackendOrder) {
       selectedBackend = backendType;
-      if (!window::create_window(selectedBackend)) {
+      if (!window::create_window()) {
         continue;
       }
       if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
@@ -154,37 +121,18 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 
   ASSERT(windowCreated, "Error creating window: {}", SDL_GetError());
 
-  // Initialize SDL_Renderer for ImGui when we can't use a Dawn backend
-  if (webgpu::g_backendType == wgpu::BackendType::Null) {
-    ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", SDL_GetError());
-  }
-#else
-  AuroraBackend selectedBackend = BACKEND_NULL;
-  ASSERT(window::create_window(BACKEND_NULL), "Error creating window: {}", SDL_GetError());
-  ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", SDL_GetError());
-#endif
-
   window::show_window();
 
-#ifdef AURORA_ENABLE_GX
   gfx::initialize();
 
   imgui::create_context();
-#endif
   const auto size = window::get_window_size();
   Log.info("Using framebuffer size {}x{} scale {}", size.fb_width, size.fb_height, size.scale);
-#ifdef AURORA_ENABLE_GX
   if (g_config.imGuiInitCallback != nullptr) {
     g_config.imGuiInitCallback(&size);
   }
   imgui::initialize();
-#endif
 
-#ifdef AURORA_ENABLE_RMLUI
-  rmlui::initialize(size);
-#endif
-
-  g_initialFrame = true;
   g_config.desiredBackend = selectedBackend;
   return {
       .backend = selectedBackend,
@@ -196,33 +144,20 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 }
 
 void shutdown() noexcept {
-#ifdef AURORA_ENABLE_GX
   gfx::render_worker::synchronize();
-#ifdef AURORA_ENABLE_RMLUI
-  rmlui::shutdown();
-#endif
   imgui::shutdown();
   gfx::shutdown();
   webgpu::shutdown();
-#endif
-  input::shutdown();
   window::shutdown();
 }
 
 const AuroraEvent* update() noexcept {
   ZoneScoped;
-  if (g_initialFrame) {
-    g_initialFrame = false;
-    if (!g_config.disableInput) {
-      input::initialize();
-    }
-  }
   return window::poll_events();
 }
 
 bool begin_frame() noexcept {
   ZoneScoped;
-#ifdef AURORA_ENABLE_GX
   {
     if (!window::is_presentable()) {
       webgpu::release_surface();
@@ -244,13 +179,11 @@ bool begin_frame() noexcept {
     return false;
   }
   window::set_frame_open(true);
-#endif
   return true;
 }
 
 void end_frame() noexcept {
   ZoneScoped;
-#ifdef AURORA_ENABLE_GX
   gx::fifo::drain();
   gfx::finish();
   auto imguiDrawData = imgui::freeze();
@@ -260,23 +193,11 @@ void end_frame() noexcept {
                                                            webgpu::g_graphicsConfig.surfaceConfiguration.height,
                                                            presentSource.size.width, presentSource.size.height);
 
-  wgpu::BindGroup rmlBindGroup;
-  bool rmlOverlay = false;
-#if AURORA_ENABLE_RMLUI
-  if (rmlui::is_initialized()) {
-    auto rmlFrame = rmlui::record_frame(viewport);
-    rmlBindGroup = std::move(rmlFrame.bindGroup);
-    rmlOverlay = rmlFrame.overlay;
-  }
-#endif
-
-  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
-                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
+  gfx::end_frame([viewport, imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
     {
-      window::SurfaceLock surfaceLock;
       if (window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
         wgpu::SurfaceTexture surfaceTexture;
@@ -291,13 +212,8 @@ void end_frame() noexcept {
 
     const bool canPresent = currentTexture && currentView;
     if (canPresent) {
-      wgpu::BindGroup presentBindGroup;
-      if (rmlBindGroup && !rmlOverlay) {
-        presentBindGroup = rmlBindGroup;
-      } else {
-        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
-        presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
-      }
+      const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
+      const wgpu::BindGroup presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
       {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
@@ -320,14 +236,9 @@ void end_frame() noexcept {
                              webgpu::g_graphicsConfig.surfaceConfiguration.height);
 
         pass.Draw(3);
-        if (rmlBindGroup && rmlOverlay) {
-          pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
-          pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
-          pass.Draw(3);
-        }
         pass.End();
       }
-      {
+      if (imguiDrawData) {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
                 .view = currentView,
@@ -362,7 +273,6 @@ void end_frame() noexcept {
       ZoneScopedN("Present");
       wgpu::ConvertibleStatus status = wgpu::Status::Error;
       {
-        window::SurfaceLock surfaceLock;
         if (window::is_presentable()) {
           status = g_surface.Present();
         }
@@ -419,7 +329,6 @@ void end_frame() noexcept {
     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
   });
   window::set_frame_open(false);
-#endif
 }
 } // namespace
 } // namespace aurora
@@ -446,9 +355,5 @@ void aurora_set_background_input(bool value) {
   aurora::window::set_background_input(value);
 }
 void aurora_set_resampler(AuroraSampler sampler) {
-#ifdef AURORA_ENABLE_GX
   aurora::webgpu::set_resampler(sampler);
-#else
-  (void)sampler;
-#endif
 }

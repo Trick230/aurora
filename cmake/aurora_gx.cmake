@@ -16,31 +16,13 @@ add_library(aurora_gx STATIC
         lib/gx/attr_fmt.cpp
         lib/gx/command_processor.cpp
         lib/gx/dl.cpp
+        lib/gx/efb_copy.cpp
         lib/gx/fifo.cpp
         lib/gx/gx.cpp
         lib/gx/pipeline.cpp
         lib/gx/recomp.cpp
         lib/gx/shader.cpp
         lib/gx/shader_info.cpp
-        lib/dolphin/gx/GXBump.cpp
-        lib/dolphin/gx/GXCull.cpp
-        lib/dolphin/gx/GXCpu2Efb.cpp
-        lib/dolphin/gx/GXDispList.cpp
-        lib/dolphin/gx/GXDraw.cpp
-        lib/dolphin/gx/GXExtra.cpp
-        lib/dolphin/gx/GXFifo.cpp
-        lib/dolphin/gx/GXFrameBuffer.cpp
-        lib/dolphin/gx/GXGeometry.cpp
-        lib/dolphin/gx/GXGet.cpp
-        lib/dolphin/gx/GXLighting.cpp
-        lib/dolphin/gx/GXManage.cpp
-        lib/dolphin/gx/GXPerf.cpp
-        lib/dolphin/gx/GXPixel.cpp
-        lib/dolphin/gx/GXTev.cpp
-        lib/dolphin/gx/GXTexture.cpp
-        lib/dolphin/gx/GXTransform.cpp
-        lib/dolphin/gx/GXVert.cpp
-        lib/dolphin/gx/GXAurora.cpp
         lib/gfx/png_io.cpp
         lib/gfx/png_io.hpp
 )
@@ -50,21 +32,3 @@ set_target_properties(aurora_gx PROPERTIES FOLDER "aurora")
 target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxhash)
 target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient PNG::PNG)
 target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
-
-if (AURORA_ENABLE_RMLUI)
-    target_sources(aurora_gx PRIVATE
-        lib/rmlui/pipeline.cpp
-        lib/rmlui/pipeline.hpp
-    )
-endif ()
-
-# gxcore (63/S12): Dolphin-ported GX core draws on this substrate. Present
-# only when the fork builds inside GXRuntime with the recomp modules on.
-if (TARGET GXRuntime::gxcore)
-    target_sources(aurora_gx PRIVATE
-        lib/gfx/gxcore_draw.cpp
-        lib/gfx/gxcore_draw.hpp
-    )
-    target_link_libraries(aurora_gx PRIVATE GXRuntime::gxcore)
-    target_compile_definitions(aurora_gx PRIVATE AURORA_ENABLE_GXCORE=1)
-endif ()

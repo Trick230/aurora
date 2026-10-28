@@ -117,3 +117,73 @@ bool resolve_texture_tlut(std::uint32_t textureSlot, GXTlutObj_* out) noexcept {
 }
 
 } // namespace aurora::gx::recomp
+
+// The SDK's GXGetTexBufferSize: bytes of a texture in GX tile layout, with
+// maxLod levels when mips is set.
+extern "C" u32 GXGetTexBufferSize(u16 width, u16 height, u32 fmt, GXBool mips, u8 maxLod) {
+  s32 shiftX = 0;
+  s32 shiftY = 0;
+  switch (fmt) {
+  case GX_TF_I4:
+  case GX_TF_C4:
+  case GX_TF_CMPR:
+  case GX_CTF_R4:
+  case GX_CTF_Z4:
+    shiftX = 3;
+    shiftY = 3;
+    break;
+  case GX_TF_I8:
+  case GX_TF_IA4:
+  case GX_TF_C8:
+  case GX_TF_Z8:
+  case GX_CTF_RA4:
+  case GX_CTF_A8:
+  case GX_CTF_R8:
+  case GX_CTF_G8:
+  case GX_CTF_B8:
+  case GX_CTF_Z8M:
+  case GX_CTF_Z8L:
+    shiftX = 3;
+    shiftY = 2;
+    break;
+  case GX_TF_IA8:
+  case GX_TF_RGB565:
+  case GX_TF_RGB5A3:
+  case GX_TF_RGBA8:
+  case GX_TF_C14X2:
+  case GX_TF_Z16:
+  case GX_TF_Z24X8:
+  case GX_CTF_RA8:
+  case GX_CTF_RG8:
+  case GX_CTF_GB8:
+  case GX_CTF_Z16L:
+    shiftX = 2;
+    shiftY = 2;
+    break;
+  default:
+    break;
+  }
+  u32 bitSize = fmt == GX_TF_RGBA8 || fmt == GX_TF_Z24X8 ? 64 : 32;
+  u32 bufLen = 0;
+  if (mips) {
+    while (maxLod != 0) {
+      const u32 tileX = ((width + (1 << shiftX) - 1) >> shiftX);
+      const u32 tileY = ((height + (1 << shiftY) - 1) >> shiftY);
+      bufLen += bitSize * tileX * tileY;
+
+      if (width == 1 && height == 1) {
+        return bufLen;
+      }
+
+      width = (width < 2) ? 1 : width / 2;
+      height = (height < 2) ? 1 : height / 2;
+      --maxLod;
+    };
+  } else {
+    const u32 tileX = ((width + (1 << shiftX) - 1) >> shiftX);
+    const u32 tileY = ((height + (1 << shiftY) - 1) >> shiftY);
+    bufLen = bitSize * tileX * tileY;
+  }
+
+  return bufLen;
+}

@@ -187,9 +187,8 @@ inline constexpr bool UseTextureBuffer = true;
 // several times a heavy retail frame; the space went to vertex arrays,
 // which a NiGHTS level frame fills past 8mb.
 inline constexpr uint64_t UniformBufferSize = 8388608;   // 8mb
-// Vertex/index raised from 3mb/1mb: a full gameplay scene through gxcore --core
-// (Dolphin-ported core, triangle-list expansion) exceeds the menu-scale sizes
-// the live SDK path used. Per-frame staging; costs ~staging_count * delta RAM.
+// Per-frame staging, so each costs its size once per frame in flight. A
+// forest frame uploads ~4.6mb of vertex arrays; the rest is headroom.
 inline constexpr uint64_t VertexBufferSize = 12582912;   // 12mb
 inline constexpr uint64_t IndexBufferSize = 8388608;     // 8mb
 inline constexpr uint64_t StorageBufferSize = 25165824;  // 24mb
@@ -239,8 +238,6 @@ using EndFrameCallback = std::function<void(wgpu::CommandEncoder&)>;
 enum class ShaderType : uint8_t {
   Clear = 0,
   GX = 1,
-  Rml = 2,
-  GXCore = 3,
 };
 
 void initialize();

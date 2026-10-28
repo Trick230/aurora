@@ -11,68 +11,26 @@ include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
 
 # When using a non-vendored Dawn, we don't get DAWN_ENABLE_* from its build.
 # Infer from the target platform instead.
+# Dawn's D3D12, Vulkan and Metal backends only: D3D11 and OpenGL are slower
+# paths the game has no need for. A non-vendored Dawn doesn't set
+# DAWN_ENABLE_*, so they come from the target platform.
 function(_aurora_dawn_set_platform_backends)
+  set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
+  set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
+  set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "")
+  set(DAWN_ENABLE_NULL OFF CACHE INTERNAL "")
   if (WIN32)
     set(DAWN_ENABLE_D3D12 ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_D3D11 ON CACHE INTERNAL "")
     set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "")
     set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
   elseif (APPLE)
     set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_VULKAN OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_METAL ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
-  elseif (ANDROID)
+  else ()
     set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "")
     set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_OPENGLES ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
-  else () # Linux / other
-    set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
-    set(DAWN_ENABLE_DESKTOP_GL ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_OPENGLES ON CACHE INTERNAL "")
-    set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
-  endif ()
-endfunction()
-
-# Prebuilt Dawn Android package has non-portable paths in it
-# Will fix upstream but this works for now
-function(_aurora_dawn_fix_android_link_interface)
-  if (NOT ANDROID OR NOT TARGET dawn::webgpu_dawn)
-    return()
-  endif ()
-
-  get_target_property(_dawn_link_libs dawn::webgpu_dawn INTERFACE_LINK_LIBRARIES)
-  if (NOT _dawn_link_libs)
-    return()
-  endif ()
-
-  set(_dawn_fixed_link_libs "")
-  set(_dawn_replaced_log FALSE)
-  foreach (_dawn_link_lib IN LISTS _dawn_link_libs)
-    if (_dawn_link_lib MATCHES "^/.*/sysroot/usr/lib/[^/]+/[0-9]+/liblog\\.so$")
-      list(APPEND _dawn_fixed_link_libs "$<LINK_ONLY:log>")
-      set(_dawn_replaced_log TRUE)
-    else ()
-      list(APPEND _dawn_fixed_link_libs "${_dawn_link_lib}")
-    endif ()
-  endforeach ()
-
-  if (_dawn_replaced_log)
-    set_target_properties(dawn::webgpu_dawn PROPERTIES
-      INTERFACE_LINK_LIBRARIES "${_dawn_fixed_link_libs}")
   endif ()
 endfunction()
 
@@ -132,6 +90,7 @@ if (_aurora_dawn_provider STREQUAL "vendor")
       set(ABSL_MSVC_STATIC_RUNTIME ON CACHE INTERNAL "Link static runtime libraries")
     endif ()
 
+    _aurora_dawn_set_platform_backends()
     include(FetchContent)
     FetchContent_Declare(dawn
       URL "https://github.com/encounter/dawn/archive/${AURORA_DAWN_REF}.tar.gz"
@@ -163,7 +122,6 @@ elseif (_aurora_dawn_provider STREQUAL "system")
   if (NOT TARGET dawn::webgpu_dawn)
     message(FATAL_ERROR "find_package(Dawn) succeeded but dawn::webgpu_dawn target not found")
   endif ()
-  _aurora_dawn_fix_android_link_interface()
   _aurora_dawn_set_platform_backends()
 
   get_target_property(_dawn_type dawn::webgpu_dawn TYPE)
@@ -241,7 +199,6 @@ elseif (_aurora_dawn_provider STREQUAL "package")
       "The package must be a Dawn install tree built with DAWN_ENABLE_INSTALL=ON.")
   endif ()
 
-  _aurora_dawn_fix_android_link_interface()
   _aurora_dawn_set_platform_backends()
 
   get_target_property(_dawn_pkg_type dawn::webgpu_dawn TYPE)

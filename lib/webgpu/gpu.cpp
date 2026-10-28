@@ -49,7 +49,6 @@ TextureWithSampler g_depthBuffer;
 // EFB -> XFB copy pipeline
 static wgpu::BindGroupLayout g_CopyBindGroupLayout;
 wgpu::RenderPipeline g_CopyPipeline;
-wgpu::RenderPipeline g_CopyPremultipliedAlphaPipeline;
 wgpu::BindGroup g_CopyBindGroup;
 static AuroraSampler g_Resampler = SAMPLER_BILINEAR;
 static wgpu::BindGroupLayout g_ResampleBindGroupLayout;
@@ -440,11 +439,6 @@ fn fs_opaque(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(efb_texture, efb_sampler, in.uv);
     return vec4(color.rgb, 1.0);
 }
-
-@fragment
-fn fs_premultiplied_alpha(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(efb_texture, efb_sampler, in.uv);
-}
 )""";
   const wgpu::ShaderModuleDescriptor moduleDescriptor{
       .nextInChain = &sourceDescriptor,
@@ -481,58 +475,36 @@ fn fs_premultiplied_alpha(in: VertexOutput) -> @location(0) vec4<f32> {
   };
   auto pipelineLayout = g_device.CreatePipelineLayout(&layoutDescriptor);
 
-  const auto make_copy_pipeline = [&](const char* label, const char* fragmentEntryPoint,
-                                      const wgpu::BlendState* blend) {
-    const std::array colorTargets{wgpu::ColorTargetState{
-        .format = g_graphicsConfig.surfaceConfiguration.format,
-        .blend = blend,
-        .writeMask = wgpu::ColorWriteMask::All,
-    }};
-    const wgpu::FragmentState fragmentState{
-        .module = module,
-        .entryPoint = fragmentEntryPoint,
-        .targetCount = colorTargets.size(),
-        .targets = colorTargets.data(),
-    };
-    const wgpu::RenderPipelineDescriptor pipelineDescriptor{
-        .label = label,
-        .layout = pipelineLayout,
-        .vertex =
-            wgpu::VertexState{
-                .module = module,
-                .entryPoint = "vs_main",
-            },
-        .primitive =
-            wgpu::PrimitiveState{
-                .topology = wgpu::PrimitiveTopology::TriangleList,
-            },
-        .multisample =
-            wgpu::MultisampleState{
-                .count = 1,
-                .mask = UINT32_MAX,
-            },
-        .fragment = &fragmentState,
-    };
-    return g_device.CreateRenderPipeline(&pipelineDescriptor);
+  const std::array colorTargets{wgpu::ColorTargetState{
+      .format = g_graphicsConfig.surfaceConfiguration.format,
+      .writeMask = wgpu::ColorWriteMask::All,
+  }};
+  const wgpu::FragmentState fragmentState{
+      .module = module,
+      .entryPoint = "fs_opaque",
+      .targetCount = colorTargets.size(),
+      .targets = colorTargets.data(),
   };
-  g_CopyPipeline = make_copy_pipeline("XFB Copy Pipeline", "fs_opaque", nullptr);
-
-  const wgpu::BlendState premultipliedAlphaBlend{
-      .color =
-          {
-              .operation = wgpu::BlendOperation::Add,
-              .srcFactor = wgpu::BlendFactor::One,
-              .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha,
+  const wgpu::RenderPipelineDescriptor pipelineDescriptor{
+      .label = "XFB Copy Pipeline",
+      .layout = pipelineLayout,
+      .vertex =
+          wgpu::VertexState{
+              .module = module,
+              .entryPoint = "vs_main",
           },
-      .alpha =
-          {
-              .operation = wgpu::BlendOperation::Add,
-              .srcFactor = wgpu::BlendFactor::One,
-              .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha,
+      .primitive =
+          wgpu::PrimitiveState{
+              .topology = wgpu::PrimitiveTopology::TriangleList,
           },
+      .multisample =
+          wgpu::MultisampleState{
+              .count = 1,
+              .mask = UINT32_MAX,
+          },
+      .fragment = &fragmentState,
   };
-  g_CopyPremultipliedAlphaPipeline =
-      make_copy_pipeline("XFB Premultiplied Alpha Copy Pipeline", "fs_premultiplied_alpha", &premultipliedAlphaBlend);
+  g_CopyPipeline = g_device.CreateRenderPipeline(&pipelineDescriptor);
 }
 
 void create_resample_pipeline() {
@@ -702,22 +674,14 @@ const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& en
 
 static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
   switch (backend) {
-  case BACKEND_WEBGPU:
-    return wgpu::BackendType::WebGPU;
-  case BACKEND_D3D11:
-    return wgpu::BackendType::D3D11;
   case BACKEND_D3D12:
     return wgpu::BackendType::D3D12;
   case BACKEND_METAL:
     return wgpu::BackendType::Metal;
   case BACKEND_VULKAN:
     return wgpu::BackendType::Vulkan;
-  case BACKEND_OPENGL:
-    return wgpu::BackendType::OpenGL;
-  case BACKEND_OPENGLES:
-    return wgpu::BackendType::OpenGLES;
   default:
-    return wgpu::BackendType::Null;
+    return wgpu::BackendType::Undefined;
   }
 }
 
@@ -734,7 +698,6 @@ static bool create_surface() {
     Log.error("Failed to create surface: no window");
     return false;
   }
-  window::SurfaceLock surfaceLock;
   const auto chainedDescriptor = utils::SetupWindowAndGetSurfaceDescriptor(window);
   if (!chainedDescriptor) {
     Log.error("Failed to create surface descriptor for current window");
@@ -783,10 +746,6 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   }
   const wgpu::BackendType backend = to_wgpu_backend(auroraBackend);
   Log.info("Attempting to initialize {}", magic_enum::enum_name(backend));
-#if 0
-  // D3D12's debug layer is very slow
-  g_dawnInstance->EnableBackendValidation(backend != WGPUBackendType::D3D12);
-#endif
 
   if (!create_surface()) {
     return false;
@@ -842,7 +801,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   if (adapterName.IsUndefined()) {
     adapterName = wgpu::StringView("Unknown");
   }
-  if (!allowCpu && g_adapterInfo.adapterType == wgpu::AdapterType::CPU && backend != wgpu::BackendType::Null) {
+  if (!allowCpu && g_adapterInfo.adapterType == wgpu::AdapterType::CPU) {
     Log.warn("Ignoring CPU adapter: {}", adapterName);
     g_adapterInfo = {};
     g_adapter = {};
@@ -948,13 +907,10 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         "skip_validation",
         "disable_robustness",
 #endif
-#ifndef ANDROID
         "use_user_defined_labels_in_backend",
-#endif
         "allow_unsafe_apis",
         "disable_symbol_renaming",
         "enable_immediate_error_handling",
-        "gl_allow_context_on_multi_threads",
     };
     constexpr std::array disableToggles{
         "timestamp_quantization",
@@ -1061,7 +1017,6 @@ void shutdown() {
   gpu_prof::shutdown();
   g_CopyBindGroupLayout = {};
   g_CopyPipeline = {};
-  g_CopyPremultipliedAlphaPipeline = {};
   g_CopyBindGroup = {};
   g_ResampleBindGroupLayout = {};
   g_ResamplePipeline = {};
@@ -1081,7 +1036,6 @@ void shutdown() {
 void release_surface() noexcept {
   gfx::gpu_synchronize();
   {
-    window::SurfaceLock surfaceLock;
     release_surface_locked();
   }
 }
@@ -1108,7 +1062,6 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
   auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
   surfaceConfiguration.device = g_device;
   {
-    window::SurfaceLock surfaceLock;
     g_surface.Configure(&surfaceConfiguration);
   }
   g_frameBuffer = create_render_texture(width, height, true);
@@ -1124,7 +1077,6 @@ bool refresh_surface(bool recreate) {
   }
   if (!window::is_presentable()) {
     {
-      window::SurfaceLock surfaceLock;
       release_surface_locked();
     }
     return false;
