@@ -2016,13 +2016,21 @@ static void invalidate_array_uploads() {
   }
 }
 
-static gfx::Range upload_array(const void* data, u32 size) {
+// The array's first size bytes, of the available ones the guest address
+// resolves to. A model's draws reach further into its arrays one at a time,
+// and a range can only be pushed whole, so a growing upload at least doubles:
+// re-pushing the exact prefix each time copied five times the data a frame
+// uses (and changed the range, which stopped draws merging).
+static gfx::Range upload_array(const void* data, u32 size, u32 available) {
   if (s_arrayUploadsFrame != gfx::current_frame()) {
     s_arrayUploadsFrame = gfx::current_frame();
     s_arrayUploads.clear();
   }
   auto& range = s_arrayUploads[data];
   if (range.size < size) {
+    if (range.size != 0) {
+      size = std::max(size, std::min(range.size * 2, available));
+    }
     range = gfx::push_storage(static_cast<const uint8_t*>(data), size);
   }
   return range;
@@ -2039,7 +2047,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     auto& array = g_gxState.arrays[i];
     const u32 requiredSize = std::min(array.size, arraySizes[i]);
     if (array.cachedRange.size < requiredSize || array.cachedRange.size == 0) {
-      array.cachedRange = upload_array(array.data, requiredSize);
+      array.cachedRange = upload_array(array.data, requiredSize, array.size);
     }
     ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
   }
