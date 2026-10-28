@@ -1850,20 +1850,20 @@ static void calculate_indexed_array_sizes(u16 vtxCount, const u8* vertices, bool
     return;
   }
   const u32 vtxSize = g_gxState.lastVtxSize;
+  // Draws average a dozen vertices, so this is one plain strided loop per
+  // index (an NBT3 normal has three) rather than anything with setup cost.
   for (u32 a = 0; a < s_indexedLayout.count; ++a) {
     const auto& layout = s_indexedLayout.attrs[a];
-    const u8* cursor = vertices + layout.offset;
+    const u8* const end = vertices + vtxCount * vtxSize;
     u32 maxIndex = 0;
-    if (layout.index16) {
-      for (u16 v = 0; v < vtxCount; ++v, cursor += vtxSize) {
-        for (u32 n = 0; n < layout.count; ++n) {
-          maxIndex = std::max<u32>(maxIndex, read_u16(cursor + n * 2, bigEndian));
+    for (u32 n = 0; n < layout.count; ++n) {
+      if (layout.index16) {
+        for (const u8* cursor = vertices + layout.offset + n * 2; cursor < end; cursor += vtxSize) {
+          maxIndex = std::max<u32>(maxIndex, read_u16(cursor, bigEndian));
         }
-      }
-    } else {
-      for (u16 v = 0; v < vtxCount; ++v, cursor += vtxSize) {
-        for (u32 n = 0; n < layout.count; ++n) {
-          maxIndex = std::max<u32>(maxIndex, cursor[n]);
+      } else {
+        for (const u8* cursor = vertices + layout.offset + n; cursor < end; cursor += vtxSize) {
+          maxIndex = std::max<u32>(maxIndex, *cursor);
         }
       }
     }
