@@ -172,6 +172,7 @@ absl::flat_hash_set<uint32_t> g_blocks;
 Clock::time_point g_base{};
 Clock::time_point g_lastArrival{};
 Clock::time_point g_shown{};
+Clock::time_point g_lastPresent{};
 Clock::duration g_period = std::chrono::nanoseconds{1'000'000'000 / 30};
 
 // Pacer handshake.
@@ -1252,8 +1253,15 @@ void present_tick() {
       capture(1.f, name);
     }
   }
-  const float t = std::clamp(time_at(shown), 0.f, 1.f);
+  const float unclamped = time_at(shown);
+  const float t = std::clamp(unclamped, 0.f, 1.f);
   const bool last = (t >= 1.f || g_blends.empty()) && !g_next.submit;
+  // Past the end with nothing newer while the game is still sending frames:
+  // the picture stops until the late one arrives. A paused game's last frame
+  // runs far past the end and isn't counted.
+  if (unclamped > 1.f && unclamped < 3.f && !g_next.submit) {
+    ++g_stats.interpStarved;
+  }
   static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Interpolated frame encoder"};
   auto encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
   // Every replay of a frame binds the blended copy, so its render bundles
@@ -1269,6 +1277,12 @@ void present_tick() {
       static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
   g_cur.present(encoder);
   ++g_stats.interpPresents;
+  const auto presented = Clock::now();
+  const auto sinceLast = presented - g_lastPresent;
+  if (sinceLast > g_interval * 3 / 2 && sinceLast < std::chrono::milliseconds{250}) {
+    ++g_stats.interpLatePresents;
+  }
+  g_lastPresent = presented;
   if (last && t >= 1.f) {
     std::lock_guard lock{g_mutex};
     g_pending = false;

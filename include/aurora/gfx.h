@@ -34,6 +34,10 @@ typedef struct {
   uint32_t interpDraws;
   uint32_t interpBlendedDraws;
   uint32_t interpMicros; // render worker time spent blending and encoding replays
+  // Hitches: replays that held a frame past its end because the next one was
+  // late, and presents more than half an interval after the one before.
+  uint32_t interpStarved;
+  uint32_t interpLatePresents;
 } AuroraStats;
 
 const AuroraStats* aurora_get_stats();
