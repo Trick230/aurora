@@ -1907,6 +1907,18 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
   return push(current_frame_packet().indices, data, length, alignment);
 }
 
+ByteBuffer& index_staging(size_t alignment) {
+  auto& indices = current_frame_packet().indices;
+  if (alignment != 0) {
+    const size_t begin = indices.size();
+    const size_t alignedBegin = AURORA_ALIGN(begin, alignment);
+    if (alignedBegin > begin) {
+      indices.append_zeroes(alignedBegin - begin);
+    }
+  }
+  return indices;
+}
+
 Range push_uniform(const uint8_t* data, size_t length) {
   ZoneScoped;
   auto& frame = current_frame_packet();

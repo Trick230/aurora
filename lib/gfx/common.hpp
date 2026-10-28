@@ -300,6 +300,9 @@ static Range push_verts(ArrayRef<T> data, size_t alignment) {
   return push_verts(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T), alignment);
 }
 Range push_indices(const uint8_t* data, size_t length, size_t alignment);
+// The frame's index staging, its end aligned to alignment, for indices
+// written in place (frame_has_room must have been checked for them).
+ByteBuffer& index_staging(size_t alignment);
 template <typename T>
 static Range push_indices(ArrayRef<T> data, size_t alignment) {
   return push_indices(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T), alignment);
