@@ -288,7 +288,11 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
 bool bind_pipeline(PipelineRef ref, const wgpu::RenderBundleEncoder& bundle);
 
 BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor);
-wgpu::BindGroup find_bind_group(BindGroupRef id);
+void bind_texture_group(BindGroupRef id, const wgpu::RenderPassEncoder& pass);
+void bind_texture_group(BindGroupRef id, const wgpu::RenderBundleEncoder& bundle);
+// Binds the whole index buffer once per pass; draws index into it by firstIndex.
+void bind_index_buffer(const wgpu::RenderPassEncoder& pass);
+void bind_index_buffer(const wgpu::RenderBundleEncoder& bundle);
 
 wgpu::Sampler sampler_ref(const wgpu::SamplerDescriptor& descriptor);
 

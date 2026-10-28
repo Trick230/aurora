@@ -28,9 +28,8 @@ static void encode_draw(const DrawData& data, const Encoder& pass) {
   const std::array offsets{data.uniformRange.offset};
   pass.SetBindGroup(1, *gfx::interp::g_vertexUniformBindGroup, offsets.size(), offsets.data());
   if (data.bindGroups.textureBindGroup) {
-    pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
+    gfx::bind_texture_group(data.bindGroups.textureBindGroup, pass);
   }
-  pass.SetIndexBuffer(gfx::g_indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
   if constexpr (std::is_same_v<Encoder, wgpu::RenderPassEncoder>) {
     if (data.dstAlpha != UINT32_MAX) {
       const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
@@ -40,7 +39,9 @@ static void encode_draw(const DrawData& data, const Encoder& pass) {
   if (data.indexCount == 0) {
     pass.Draw(data.vtxCount, data.instanceCount, 0, data.firstInstance);
   } else {
-    pass.DrawIndexed(data.indexCount, data.instanceCount, 0, 0, data.firstInstance);
+    gfx::bind_index_buffer(pass);
+    pass.DrawIndexed(data.indexCount, data.instanceCount, data.idxRange.offset / sizeof(uint16_t), 0,
+                     data.firstInstance);
   }
 }
 

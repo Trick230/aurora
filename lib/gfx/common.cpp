@@ -119,6 +119,10 @@ static std::array<std::atomic<BufferMapState>, StagingBufferCount> s_mappingStat
 static wgpu::Limits g_cachedLimits;
 static uint32_t g_frameIndex = UINT32_MAX;
 static PipelineRef g_currentPipeline;
+// Texture group bound at slot 2 (0: the empty one) and whether the index
+// buffer is bound, so draws only re-set what changed.
+static BindGroupRef g_currentTextureBindGroup;
+static bool g_indexBufferBound;
 wgpu::BindGroupLayout g_staticBindGroupLayout;
 wgpu::BindGroup g_staticBindGroup;
 wgpu::BindGroupLayout g_uniformBindGroupLayout;
@@ -1189,6 +1193,8 @@ static void encode_command(const wgpu::RenderPassEncoder& pass, const RenderPass
 
 static void bind_pass_groups(const wgpu::RenderPassEncoder& pass) {
   g_currentPipeline = UINTPTR_MAX;
+  g_currentTextureBindGroup = 0;
+  g_indexBufferBound = false;
   pass.SetBindGroup(0, g_staticBindGroup);
   pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
 }
@@ -1227,6 +1233,8 @@ static void build_replay_steps(RenderPass& passInfo) {
     if (!bundle) {
       bundle = g_device.CreateRenderBundleEncoder(&descriptor);
       g_currentPipeline = UINTPTR_MAX;
+      g_currentTextureBindGroup = 0;
+      g_indexBufferBound = false;
       bundle.SetBindGroup(0, g_staticBindGroup);
       bundle.SetBindGroup(2, gx::g_emptyTextureBindGroup);
     }
@@ -1396,12 +1404,39 @@ BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor) {
   return id;
 }
 
-wgpu::BindGroup find_bind_group(BindGroupRef id) {
-  std::lock_guard lock{g_bindGroupCacheMutex};
-  const auto it = g_cachedBindGroups.find(id);
-  CHECK(it != g_cachedBindGroups.end(), "get_bind_group: failed to locate {:x}", id);
-  return it->second.bindGroup;
+template <typename Encoder>
+static void bind_texture_group_on(BindGroupRef id, const Encoder& pass) {
+  if (id == g_currentTextureBindGroup) {
+    return;
+  }
+  wgpu::BindGroup group;
+  {
+    std::lock_guard lock{g_bindGroupCacheMutex};
+    const auto it = g_cachedBindGroups.find(id);
+    CHECK(it != g_cachedBindGroups.end(), "bind_texture_group: failed to locate {:x}", id);
+    group = it->second.bindGroup;
+  }
+  pass.SetBindGroup(2, group);
+  g_currentTextureBindGroup = id;
 }
+
+void bind_texture_group(BindGroupRef id, const wgpu::RenderPassEncoder& pass) { bind_texture_group_on(id, pass); }
+
+void bind_texture_group(BindGroupRef id, const wgpu::RenderBundleEncoder& bundle) {
+  bind_texture_group_on(id, bundle);
+}
+
+template <typename Encoder>
+static void bind_index_buffer_on(const Encoder& pass) {
+  if (!g_indexBufferBound) {
+    pass.SetIndexBuffer(g_indexBuffer, wgpu::IndexFormat::Uint16);
+    g_indexBufferBound = true;
+  }
+}
+
+void bind_index_buffer(const wgpu::RenderPassEncoder& pass) { bind_index_buffer_on(pass); }
+
+void bind_index_buffer(const wgpu::RenderBundleEncoder& bundle) { bind_index_buffer_on(bundle); }
 
 wgpu::Sampler sampler_ref(const wgpu::SamplerDescriptor& descriptor) {
   const auto id = xxh3_hash(descriptor);
