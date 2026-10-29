@@ -101,8 +101,32 @@ struct RetailTextureEntry {
   u32 lastFrame = 0;
 };
 
+// Behind it, the textures by contents (from upstream 7af8def): data a new key
+// shows (the same texture at another address, as after a heap reload) reuses
+// the GPU texture instead of decoding and uploading it again.
+struct ContentTextureKey {
+  HashType hash = 0;
+  u32 width = 0;
+  u32 height = 0;
+  u32 format = 0;
+  u32 mipCount = 0;
+  u32 tlutFormat = 0;
+
+  bool operator==(const ContentTextureKey& rhs) const = default;
+  template <typename H>
+  friend H AbslHashValue(H h, const ContentTextureKey& key) {
+    return H::combine(std::move(h), key.hash, key.width, key.height, key.format, key.mipCount, key.tlutFormat);
+  }
+};
+
+struct ContentTextureEntry {
+  gfx::TextureHandle handle;
+  u32 lastFrame = 0;
+};
+
 constexpr u32 RetailTextureMaxIdleFrames = 600;
 absl::flat_hash_map<RetailTextureKey, RetailTextureEntry> s_retailTextures;
+absl::flat_hash_map<ContentTextureKey, ContentTextureEntry> s_contentTextures;
 u32 s_retailTextureSweepFrame = 0;
 
 template <typename Create>
@@ -110,8 +134,9 @@ gfx::TextureHandle resolve_retail_texture(const GXTexObj_& obj, const GXTlutObj_
   const u32 frame = gfx::current_frame();
   if (frame - s_retailTextureSweepFrame >= RetailTextureMaxIdleFrames) {
     s_retailTextureSweepFrame = frame;
-    absl::erase_if(s_retailTextures,
-                   [frame](const auto& it) { return frame - it.second.lastFrame > RetailTextureMaxIdleFrames; });
+    const auto idle = [frame](const auto& it) { return frame - it.second.lastFrame > RetailTextureMaxIdleFrames; };
+    absl::erase_if(s_retailTextures, idle);
+    absl::erase_if(s_contentTextures, idle);
   }
 
   const RetailTextureKey key{
@@ -132,16 +157,36 @@ gfx::TextureHandle resolve_retail_texture(const GXTexObj_& obj, const GXTlutObj_
   if (tlut != nullptr) {
     hash = xxh3_hash_s(tlut->data, static_cast<size_t>(tlut->numEntries) * sizeof(u16), hash);
   }
-  if (!entry.handle || entry.hash != hash) {
+  const ContentTextureKey contentKey{
+      .hash = hash,
+      .width = key.width,
+      .height = key.height,
+      .format = key.format,
+      .mipCount = key.mipCount,
+      .tlutFormat = key.tlutFormat,
+  };
+  if (!entry.handle) {
+    auto& content = s_contentTextures[contentKey];
+    if (!content.handle) {
+      content.handle = create();
+    }
+    content.lastFrame = frame;
+    entry.handle = content.handle;
+  } else if (entry.hash != hash) {
+    // Data that changes in place (animated) gets a texture of its own, not kept
+    // by contents.
     entry.handle = create();
-    entry.hash = hash;
+  } else if (const auto it = s_contentTextures.find(contentKey); it != s_contentTextures.end()) {
+    it->second.lastFrame = frame;
   }
+  entry.hash = hash;
   entry.lastFrame = frame;
   return entry.handle;
 }
 
 void do_clear_static_texture_cache() noexcept {
   s_retailTextures.clear();
+  s_contentTextures.clear();
 }
 
 DynamicPaletteKey make_dynamic_palette_key(const GXTexObj_& obj, const GXState::CopyTextureRef& source) {
