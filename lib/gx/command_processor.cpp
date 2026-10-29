@@ -650,7 +650,10 @@ static void handle_bp(u32 value, bool bigEndian) {
     const u32 merged = (g_gxState.bpRegCache[regId] & ~ssMask) | (value & ssMask);
     value = (regId << 24) | (merged & 0x00FFFFFF);
     s_registers.bpWritten.set(regId);
-    if (g_gxState.bpRegCache[regId] == value && regId != 0x52)
+    // A rewrite of the same value is a no-op, except for the registers whose
+    // write is the command: an EFB copy, and a TLUT load into the same TMEM
+    // slot (each character loads its palette there).
+    if (g_gxState.bpRegCache[regId] == value && regId != 0x52 && regId != 0x65)
       return;
     g_gxState.bpRegCache[regId] = value;
   }
