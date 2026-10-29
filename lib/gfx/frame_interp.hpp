@@ -53,11 +53,12 @@ struct DrawRecord {
   HashType key;   // pipeline, textures and sizes
   HashType group; // pipeline and textures, for draws whose sizes changed
   uint32_t offset;  // the matrices of the draw's uniform block in the frame's uniform stream
-  uint32_t current; // the position matrix vertices use without a matrix index
+  uint32_t current; // the position matrix placing it: the one vertices use without a matrix index, else the first they pick
   std::array<MatrixSources, MatrixSlots> sources;
   uint16_t lights;  // as in BlockLayout
   uint16_t post;
   uint16_t camera;  // 1 + the frame's camera the draw's matrices were built with, 0 if unknown
+  uint16_t used;    // bit n: its vertices use position matrix n
 };
 
 // Encodes the retained frame's passes again into the encoder.
@@ -84,6 +85,9 @@ void discard();
 
 // Render thread, while recording: notes a GX draw's uniform block.
 void record_draw(const DrawRecord& record);
+// Render thread, while recording: a draw merged into the last one recorded
+// adds the position matrices its vertices use.
+void merge_draw(uint16_t used);
 // Render thread, while recording: notes a camera of the frame, returning the
 // value for DrawRecord::camera.
 uint16_t record_camera(const ViewMatrix& view);

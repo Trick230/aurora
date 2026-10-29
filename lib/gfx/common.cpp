@@ -1160,6 +1160,13 @@ static void replay_frame(wgpu::CommandEncoder& cmd, FramePacket& frame) {
 
 void interp::record_draw(const DrawRecord& record) { current_frame_packet().interpDraws.push_back(record); }
 
+void interp::merge_draw(uint16_t used) {
+  auto& draws = current_frame_packet().interpDraws;
+  if (!draws.empty()) {
+    draws.back().used |= used;
+  }
+}
+
 uint16_t interp::record_camera(const ViewMatrix& view) {
   auto& cameras = current_frame_packet().interpCameras;
   cameras.push_back(view);

@@ -12,6 +12,7 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <algorithm>
+#include <bit>
 #include <bitset>
 #include <cmath>
 #include <cstdint>
@@ -26,6 +27,8 @@ static u32 s_display_list_depth = 0;
 // frame it was given in.
 static u16 s_viewCamera = 0;
 static u32 s_viewFrame = UINT32_MAX;
+// The position matrices the vertices of the draw being pushed use.
+static u16 s_vtxMatrices = 0;
 static constexpr u32 MaxDisplayListDepth = 16;
 
 // Triangle-list indices for a primitive's vertices, appended to buf. The
@@ -1877,6 +1880,16 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
 
   std::array<u32, GX_VA_MAX_ATTR> arraySizes;
   calculate_indexed_array_sizes(vtxCount, data + pos, bigEndian, arraySizes);
+  if (gfx::interp::enabled()) {
+    // A vertex's matrix index, when it has one, is its first byte: the
+    // matrix's row in XF memory.
+    s_vtxMatrices = 0;
+    if (g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_NONE) {
+      for (u32 v = 0; v < vtxCount; ++v) {
+        s_vtxMatrices |= 1u << std::min<u32>(data[pos + v * vtxSize] / 3, MaxPnMtx - 1);
+      }
+    }
+  }
 
   // Merge into the previous draw when it was built from identical state,
   // including the vertex format and the array ranges its uniform block holds.
@@ -1952,6 +1965,9 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
     lastDraw->vtxCount += vtxCount;
     lastDraw->indexCount += numIndices;
+    if (gfx::interp::enabled() && s_vtxMatrices != 0) {
+      gfx::interp::merge_draw(s_vtxMatrices);
+    }
     ++gfx::g_mergedDrawCallCount;
     return;
   }
@@ -2087,11 +2103,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         .key = static_cast<HashType>(hasher.digest()),
         .group = group,
         .offset = layout.matrices,
-        .current = g_gxState.currentPnMtx,
+        .current = s_vtxMatrices != 0 ? static_cast<u32>(std::countr_zero(s_vtxMatrices)) : g_gxState.currentPnMtx,
         .sources = g_gxState.pnMtxSource,
         .lights = layout.lights,
         .post = layout.post,
         .camera = s_viewFrame == gfx::current_frame() ? s_viewCamera : u16{0},
+        .used = s_vtxMatrices != 0 ? s_vtxMatrices : static_cast<u16>(1u << std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1)),
     });
   }
   gfx::push_draw_command(DrawData{

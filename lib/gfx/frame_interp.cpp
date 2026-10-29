@@ -520,17 +520,24 @@ void estimate_camera() {
 // of its model's instances: 5% of its distance from the eye.
 float near_enough(const Vec3& target) { return 0.0025f * length2(target) + 1e-4f; }
 
-// Whether draw a loaded most of its position matrices from where b did.
-bool shares_sources(const DrawRecord& a, const DrawRecord& b) {
-  uint32_t loaded = 0;
-  uint32_t shared = 0;
-  for (const auto& source : a.sources) {
-    if (source.pos == 0) {
+// How many of the position matrices draw a uses it loaded from an address,
+// and how many of those b loaded from too.
+void count_sources(const DrawRecord& a, const DrawRecord& b, uint32_t& loaded, uint32_t& shared) {
+  for (uint32_t n = 0; n < gx::MaxPnMtx; ++n) {
+    const auto& source = a.sources[n];
+    if (source.pos == 0 || !(a.used >> n & 1u)) {
       continue;
     }
     ++loaded;
     shared += std::ranges::any_of(b.sources, [&](const MatrixSources& other) { return other.pos == source.pos; });
   }
+}
+
+// Whether draw a loaded most of the position matrices it uses from where b did.
+bool shares_sources(const DrawRecord& a, const DrawRecord& b) {
+  uint32_t loaded = 0;
+  uint32_t shared = 0;
+  count_sources(a, b, loaded, shared);
   return shared * 2 > loaded;
 }
 
@@ -857,6 +864,28 @@ uint32_t pick_identity(const IdentityIndex& index, const DrawRecord& draw, const
   }
   if (j == NoMatch || (!exact && index.next[j] == NoMatch)) {
     return j;
+  }
+  // A skinned model's instances can share the matrix placing them (a common
+  // root), and so stand at the same place: the one whose bones were loaded
+  // from where this one's were, else one instance's skeleton blends into
+  // another's.
+  uint32_t mostShared = 0;
+  uint32_t sharing = NoMatch;
+  uint32_t loaded = 0;
+  for (uint32_t k = j; k != NoMatch; k = index.next[k]) {
+    if (g_used[k]) {
+      continue;
+    }
+    uint32_t shared = 0;
+    loaded = 0; // the same for every candidate
+    count_sources(draw, g_prev.draws[k], loaded, shared);
+    if (shared > mostShared) {
+      mostShared = shared;
+      sharing = k;
+    }
+  }
+  if (loaded >= 2 && mostShared * 2 > loaded) {
+    return sharing;
   }
   const Vec3 target = translation(mtx);
   const float tight = 1e-4f * length2(target) + 1e-4f;
