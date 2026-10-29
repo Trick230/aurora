@@ -14,6 +14,7 @@ add_library(aurora_gx STATIC
         lib/gx/attr_fmt.cpp
         lib/gx/command_processor.cpp
         lib/gx/efb_copy.cpp
+        lib/gx/fifo.cpp
         lib/gx/gx.cpp
         lib/gx/pipeline.cpp
         lib/gx/recomp.cpp
