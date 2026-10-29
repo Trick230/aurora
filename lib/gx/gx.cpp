@@ -4,6 +4,8 @@
 #include "../webgpu/gpu.hpp"
 #include "../internal.hpp"
 #include "../gfx/common.hpp"
+#include "../gfx/lru_cache.hpp"
+#include "../gfx/tex_copy_conv.hpp"
 #include "../gfx/tex_palette_conv.hpp"
 #include "../gfx/texture.hpp"
 #include "../gfx/texture_convert.hpp"
@@ -376,18 +378,54 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept {
 
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.textures[static_cast<size_t>(id)]; }
 
+// From upstream b922153: copy textures by destination, size and format. The
+// current copy at each destination stays pinned (on hardware it is in guest
+// memory, and the game may sample one long after making it); one a copy of
+// another size or format replaced is kept for reuse within a budget, and goes
+// once idle, so a game copying many sizes doesn't grow VRAM forever.
+namespace {
+void retire_copy_texture(const GXState::CopyTextureRef& copy) {
+  // The palette conversions of a retired copy key by its pointer.
+  for (auto& [_, cache] : s_tlutObjectCaches) {
+    absl::erase_if(cache.dynamicPaletteTextures,
+                   [&](const auto& entry) { return entry.first.sourceIdentity == copy.handle.get(); });
+  }
+}
+
+gfx::LruCache<GXState::CopyTextureKey, GXState::CopyTextureRef> s_copyCache{
+    gfx::RenderTextureCacheLimits,
+    retire_copy_texture,
+};
+} // namespace
+
+GXState::CopyTextureRef& resolve_copy_texture(const GXState::CopyTextureKey& key) noexcept {
+  auto* copy = s_copyCache.pin(key);
+  auto& current = g_gxState.copyTextures[key.dest];
+  if (current && current.key != key) {
+    s_copyCache.unpin(current.key);
+  }
+  if (copy == nullptr) {
+    auto handle = gfx::tex_copy_conv::needs_conversion(key.format)
+                      ? gfx::new_conv_texture(key.width, key.height, key.format, "Copy Conv Texture")
+                      // The copy writes alpha 1 itself where the EFB has none (and RGB565's blit).
+                      : gfx::new_render_texture(key.width, key.height, GX_TF_RGBA8, "Resolved Texture");
+    const u64 bytes = u64{key.width} * key.height * 4;
+    copy = &s_copyCache.insert_pinned(key, {.handle = std::move(handle), .key = key}, bytes);
+  }
+  ++copy->revision;
+  current = *copy;
+  return current;
+}
+
+void end_frame_copy_textures() noexcept { s_copyCache.end_frame(); }
+
 void clear_copy_texture_cache() noexcept {
   g_gxState.copyTextures.clear();
-  g_gxState.copyTextureCache.clear();
+  s_copyCache.clear();
   for (auto& [_, cache] : s_tlutObjectCaches) {
     cache.dynamicPaletteTextures.clear();
   }
 }
-
-// The copies kept for reuse by later copies of the same size. Live copies
-// stay: on hardware a copy is in guest memory, whatever the window does, and
-// the game may sample one long after making it (a texture it builds once).
-void clear_copy_reuse_cache() noexcept { g_gxState.copyTextureCache.clear(); }
 
 void clear_static_texture_cache() noexcept { s_staticTextureCacheClearPending.store(true, std::memory_order_release); }
 

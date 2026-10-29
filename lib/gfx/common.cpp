@@ -933,6 +933,7 @@ void end_frame(EndFrameCallback callback) {
   for (auto& array : gx::g_gxState.arrays) {
     array.cachedRange = {};
   }
+  gx::end_frame_copy_textures();
   ++g_frameIndex;
   g_recordingFrame = nullptr;
 

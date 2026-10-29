@@ -41,6 +41,8 @@ Checked against upstream `505b5eb` (2026-10-29):
   copy rect only and `GXSetDstAlpha` through the shader (`9c0bf66`)
 - no `tev_overflow` on registers a clamped stage wrote (`4998dcc`)
 - texture reuse by contents (`7af8def`), on the FIFO's retail texture cache
+- copy textures in an LRU (`b922153`): the current copy at each destination
+  stays, replaced ones go within 64 MB or once idle; no clear on resize
 
 Not taken: the RmlUi, input, WPAD, Android and THP work, the public gfx APIs,
 and the regs/recording refactors the FIFO host replaces.

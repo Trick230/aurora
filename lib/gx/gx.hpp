@@ -323,9 +323,25 @@ inline bool operator==(const AttrArray& lhs, const AttrArray& rhs) {
 inline bool operator!=(const AttrArray& lhs, const AttrArray& rhs) { return !(lhs == rhs); }
 
 struct GXState {
+  struct CopyTextureKey {
+    const void* dest = nullptr;
+    u32 width = 0;
+    u32 height = 0;
+    GXTexFmt format = GX_TF_I4;
+
+    bool operator==(const CopyTextureKey& rhs) const {
+      return dest == rhs.dest && width == rhs.width && height == rhs.height && format == rhs.format;
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H h, const CopyTextureKey& key) {
+      return H::combine(std::move(h), key.dest, key.width, key.height, key.format);
+    }
+  };
   struct CopyTextureRef {
     gfx::TextureHandle handle;
     u32 revision = 0;
+    CopyTextureKey key;
 
     operator bool() const noexcept { return handle.operator bool(); }
   };
@@ -394,23 +410,9 @@ struct GXState {
   u32 texCopyDstHeight = 0;
   const void* texCopyDest = nullptr;
   u32 texCopyDestPhysical = UINT32_MAX;
-  struct CopyTextureKey {
-    const void* dest = nullptr;
-    u32 width = 0;
-    u32 height = 0;
-    GXTexFmt format = GX_TF_I4;
-
-    bool operator==(const CopyTextureKey& rhs) const {
-      return dest == rhs.dest && width == rhs.width && height == rhs.height && format == rhs.format;
-    }
-
-    template <typename H>
-    friend H AbslHashValue(H h, const CopyTextureKey& key) {
-      return H::combine(std::move(h), key.dest, key.width, key.height, key.format);
-    }
-  };
+  // The current copy at each destination; the textures themselves live in
+  // resolve_copy_texture's cache.
   absl::flat_hash_map<const void*, CopyTextureRef> copyTextures;
-  absl::flat_hash_map<CopyTextureKey, CopyTextureRef> copyTextureCache;
   bool depthCompare = true;
   bool depthUpdate = true;
   bool colorUpdate = true;
@@ -440,7 +442,10 @@ void initialize() noexcept;
 void shutdown() noexcept;
 void clear_static_texture_cache() noexcept;
 void clear_copy_texture_cache() noexcept;
-void clear_copy_reuse_cache() noexcept;
+// The texture an EFB copy of key resolves into, now the copy at key.dest.
+GXState::CopyTextureRef& resolve_copy_texture(const GXState::CopyTextureKey& key) noexcept;
+// Ages out the copy textures no destination holds any more.
+void end_frame_copy_textures() noexcept;
 // The game configures VI for a 640x480 EFB once and never changes it.
 constexpr Vec2<uint32_t> EfbSize{640, 480};
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept;

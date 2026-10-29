@@ -32,32 +32,18 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
   const auto texCopyFmt = g_gxState.texCopyFmt;
 
-  const GXState::CopyTextureKey key{
+  const auto& copy = resolve_copy_texture({
       .dest = dest,
       .width = dstWidth,
       .height = dstHeight,
       .format = texCopyFmt,
-  };
-  auto it = g_gxState.copyTextureCache.find(key);
-  if (it == g_gxState.copyTextureCache.end()) {
-    gfx::TextureHandle handle;
-    if (gfx::tex_copy_conv::needs_conversion(texCopyFmt)) {
-      handle = gfx::new_conv_texture(dstWidth, dstHeight, texCopyFmt, "Copy Conv Texture");
-    } else {
-      // The copy writes alpha 1 itself where the EFB has none (and RGB565's blit).
-      handle = gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8, "Resolved Texture");
-    }
-    it = g_gxState.copyTextureCache.emplace(key, GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
-  }
-  auto& handle = it->second;
+  });
 
   const bool efbAlpha = efb_has_alpha(g_gxState.pixelFmt);
   const auto clearColor = clear && g_gxState.colorUpdate;
   const auto clearAlpha = clear && g_gxState.alphaUpdate && efbAlpha;
   const auto clearDepth = clear && g_gxState.depthUpdate;
-  gfx::resolve_pass(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor, clear_depth_value(),
+  gfx::resolve_pass(copy.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor, clear_depth_value(),
                     texCopyFmt, !efbAlpha);
-  ++handle.revision;
-  g_gxState.copyTextures[dest] = handle;
 }
 } // namespace aurora::gx
