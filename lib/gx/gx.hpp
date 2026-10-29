@@ -472,6 +472,8 @@ static inline bool requires_load_conversion(const GXTexObj_& obj) {
   }
 }
 static inline bool is_palette_format(u32 fmt) { return fmt == GX_TF_C4 || fmt == GX_TF_C8 || fmt == GX_TF_C14X2; }
+constexpr bool efb_has_alpha(GXPixelFmt format) noexcept { return format == GX_PF_RGBA6_Z24; }
+
 static inline bool is_depth_format(u32 fmt) {
   return fmt == GX_TF_Z8 || fmt == GX_TF_Z16 || fmt == GX_TF_Z24X8 || fmt == GX_CTF_Z4 || fmt == GX_CTF_Z8M ||
          fmt == GX_CTF_Z8L || fmt == GX_CTF_Z16L;
@@ -487,6 +489,11 @@ struct AttrConfig {
   bool le = true;
   bool nbt3 = false;     // GX_NRM_NBT3
 };
+// How a draw's GXSetDstAlpha constant reaches the EFB's alpha: the blend's
+// alpha is the constant times the shader's alpha, which Replace makes 1;
+// DualSource keeps the TEV alpha for the color blend in a second output.
+enum class DstAlphaMode : u8 { None, Replace, DualSource };
+
 struct ShaderConfig {
   u8 fogType = GX_FOG_NONE;
   u8 vtxStride = 0;
@@ -541,10 +548,11 @@ struct BindGroupRanges {
   bool operator==(const BindGroupRanges& rhs) const = default;
 };
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept;
-wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
+wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, DstAlphaMode dstAlphaMode,
+                                    ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept;
-std::string build_shader_source(const ShaderConfig& config) noexcept;
-wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
+std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlphaMode) noexcept;
+wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode dstAlphaMode) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;

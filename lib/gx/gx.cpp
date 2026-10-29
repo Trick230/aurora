@@ -434,7 +434,7 @@ static inline wgpu::CompareFunction to_compare_function(GXCompare func) {
 }
 
 static inline wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendFactor dstFac,
-                                              GXLogicOp op, u32 dstAlpha) {
+                                              GXLogicOp op, u32 dstAlpha, bool dualSource) {
   wgpu::BlendComponent colorBlendComponent;
   switch (mode) {
     DEFAULT_FATAL("unsupported blend mode {}", underlying(mode));
@@ -485,6 +485,16 @@ static inline wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor sr
       break;
     }
     break;
+  }
+  if (dualSource) {
+    // The source alpha the color blend reads is the TEV's, in the second output.
+    const auto remap = [](wgpu::BlendFactor factor) {
+      return factor == wgpu::BlendFactor::SrcAlpha           ? wgpu::BlendFactor::Src1Alpha
+             : factor == wgpu::BlendFactor::OneMinusSrcAlpha ? wgpu::BlendFactor::OneMinusSrc1Alpha
+                                                             : factor;
+    };
+    colorBlendComponent.srcFactor = remap(colorBlendComponent.srcFactor);
+    colorBlendComponent.dstFactor = remap(colorBlendComponent.dstFactor);
   }
   wgpu::BlendComponent alphaBlendComponent;
   if (dstAlpha != UINT32_MAX) {
@@ -538,7 +548,8 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
   };
 }
 
-wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
+wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, DstAlphaMode dstAlphaMode,
+                                    ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept {
   const wgpu::DepthStencilState depthStencil{
       .format = g_graphicsConfig.depthFormat,
@@ -546,7 +557,8 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
       .depthCompare = config.depthCompare ? to_compare_function(config.depthFunc) : wgpu::CompareFunction::Always,
   };
   const auto blendState =
-      to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp, config.dstAlpha);
+      to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp, config.dstAlpha,
+                     dstAlphaMode == DstAlphaMode::DualSource);
   const std::array colorTargets{wgpu::ColorTargetState{
       .format = g_graphicsConfig.surfaceConfiguration.format,
       .blend = &blendState,
@@ -676,7 +688,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       .blendFacSrc = g_gxState.blendFacSrc,
       .blendFacDst = g_gxState.blendFacDst,
       .blendOp = g_gxState.blendOp,
-      .dstAlpha = g_gxState.dstAlpha,
+      // Only an EFB that keeps alpha takes the constant.
+      .dstAlpha = g_gxState.alphaUpdate && efb_has_alpha(g_gxState.pixelFmt) ? g_gxState.dstAlpha : UINT32_MAX,
       .depthCompare = g_gxState.depthCompare,
       .depthUpdate = g_gxState.depthUpdate,
       .alphaUpdate = g_gxState.alphaUpdate,

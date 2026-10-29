@@ -249,8 +249,10 @@ void end_frame(EndFrameCallback callback);
 uint32_t current_frame() noexcept;
 void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void gpu_synchronize();
+// Ends the pass with a copy of rect into texture (opaqueAlpha: the EFB keeps no
+// alpha, so the copy reads 1), then clears rect of what the flags say.
 void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
-                  Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat = GX_TF_RGBA8);
+                  Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat, bool opaqueAlpha);
 
 uint32_t get_sample_count() noexcept;
 void clear_caches() noexcept;

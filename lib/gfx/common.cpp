@@ -163,6 +163,7 @@ struct RenderPass {
 
   TextureHandle resolveTarget;
   GXTexFmt resolveFormat = GX_TF_RGBA8;
+  bool resolveOpaqueAlpha = false;
   ClipRect resolveRect;
   Range resolveUniformRange;
   Vec4<float> clearColorValue{0.f, 0.f, 0.f, 0.f};
@@ -498,26 +499,42 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
 }
 
 void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
-                  Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {
+                  Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat, bool opaqueAlpha) {
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_currentRenderPass];
   prevPass.resolveTarget = std::move(texture);
   prevPass.resolveRect = rect;
   prevPass.resolveFormat = resolveFormat;
-  // Push UV transform uniform for tex_copy_conv (crop region in UV space)
+  prevPass.resolveOpaqueAlpha = opaqueAlpha && !gx::is_depth_format(resolveFormat);
+  // tex_copy_conv's uniform: the crop region in UV space, and whether alpha reads 1
   const auto srcW = static_cast<float>(prevPass.targetSize.width);
   const auto srcH = static_cast<float>(prevPass.targetSize.height);
-  const std::array uvTransform{
-      static_cast<float>(rect.x) / srcW,
-      static_cast<float>(rect.y) / srcH,
-      static_cast<float>(rect.width) / srcW,
-      static_cast<float>(rect.height) / srcH,
+  struct {
+    float offset[2];
+    float scale[2];
+    uint32_t opaqueAlpha;
+    uint32_t pad;
+  } const uniform{
+      .offset = {static_cast<float>(rect.x) / srcW, static_cast<float>(rect.y) / srcH},
+      .scale = {static_cast<float>(rect.width) / srcW, static_cast<float>(rect.height) / srcH},
+      .opaqueAlpha = prevPass.resolveOpaqueAlpha,
+      .pad = 0,
   };
-  prevPass.resolveUniformRange = push_uniform(uvTransform);
+  prevPass.resolveUniformRange = push_uniform(uniform);
   enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
 
-  // Populate new render pass from previous
+  // Populate new render pass from previous. A clear of the whole target is the
+  // pass's load op; of part of it (or of only color or alpha), a clear draw.
   const auto msaaSamples = prevPass.msaaSamples;
+  const auto& targetSize = prevPass.targetSize;
+  const auto left = std::clamp<int32_t>(rect.x, 0, static_cast<int32_t>(targetSize.width));
+  const auto top = std::clamp<int32_t>(rect.y, 0, static_cast<int32_t>(targetSize.height));
+  const auto right = std::clamp<int32_t>(rect.x + rect.width, left, static_cast<int32_t>(targetSize.width));
+  const auto bottom = std::clamp<int32_t>(rect.y + rect.height, top, static_cast<int32_t>(targetSize.height));
+  const ClipRect clearRect{.x = left, .y = top, .width = right - left, .height = bottom - top};
+  const bool fullTarget = left == 0 && top == 0 && right == static_cast<int32_t>(targetSize.width) &&
+                          bottom == static_cast<int32_t>(targetSize.height);
+  const bool fullColorClear = clearColor && clearAlpha && fullTarget;
   RenderPass newPass{
       .label = "EFB",
       .colorView = prevPass.colorView,
@@ -530,8 +547,8 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
       .msaaSamples = msaaSamples,
       .clearColorValue = clearColorValue,
       .clearDepthValue = clearDepthValue,
-      .clearColor = clearColor && clearAlpha,
-      .clearDepth = clearDepth,
+      .clearColor = fullColorClear,
+      .clearDepth = clearDepth && fullTarget,
       .hasDepth = prevPass.hasDepth,
       .hasStencil = prevPass.hasStencil,
       .bundleable = prevPass.bundleable,
@@ -540,14 +557,16 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   current_render_passes().emplace_back(std::move(newPass));
   ++g_currentRenderPass;
 
-  if (!newPass.clearColor && (clearColor || clearAlpha)) {
-    // If we're only clearing color _or_ alpha, perform a clear draw
+  const bool drawClearColor = clearColor && !fullColorClear;
+  const bool drawClearAlpha = clearAlpha && !fullColorClear;
+  const bool drawClearDepth = clearDepth && !fullTarget;
+  if (clearRect.width > 0 && clearRect.height > 0 && (drawClearColor || drawClearAlpha || drawClearDepth)) {
     push_draw_command(clear::DrawData{
         .pipeline = pipeline_ref(clear::PipelineConfig{
             .msaaSamples = msaaSamples,
-            .clearColor = clearColor,
-            .clearAlpha = clearAlpha,
-            .clearDepth = false, // Depth cleared via render attachment
+            .clearColor = drawClearColor,
+            .clearAlpha = drawClearAlpha,
+            .clearDepth = drawClearDepth,
         }),
         .color =
             wgpu::Color{
@@ -556,6 +575,8 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
                 .b = clearColorValue.z(),
                 .a = clearColorValue.w(),
             },
+        .depth = clearDepthValue,
+        .rect = clearRect,
     });
   }
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
@@ -1114,6 +1135,8 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
     const bool needsScaling = dstSize.width != static_cast<uint32_t>(passInfo.resolveRect.width) ||
                               dstSize.height != static_cast<uint32_t>(passInfo.resolveRect.height);
     const bool isDepth = gx::is_depth_format(passInfo.resolveFormat);
+    // A plain copy only where the target matches the EFB and keeps its alpha.
+    const bool sameFormat = passInfo.resolveTarget->format == webgpu::g_graphicsConfig.surfaceConfiguration.format;
     const tex_copy_conv::ConvRequest convReq{
         .fmt = passInfo.resolveFormat,
         .srcView = isDepth ? passInfo.copySourceDepthView : passInfo.copySourceView,
@@ -1124,7 +1147,7 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
     };
     if (needsConversion) {
       tex_copy_conv::run(cmd, convReq);
-    } else if (needsScaling) {
+    } else if (needsScaling || passInfo.resolveOpaqueAlpha || !sameFormat) {
       tex_copy_conv::blit(cmd, convReq);
     } else {
       const wgpu::TexelCopyTextureInfo src{

@@ -9,6 +9,7 @@ struct DrawData {
   PipelineRef pipeline;
   wgpu::Color color;
   float depth = 0.f;
+  ClipRect rect{}; // in the target
 };
 
 constexpr uint32_t ClearPipelineConfigVersion = 2;

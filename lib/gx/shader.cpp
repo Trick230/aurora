@@ -836,7 +836,7 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
                      alpha ? "a"sv : ""sv);
 }
 
-std::string build_shader_source(const ShaderConfig& config) noexcept {
+std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlphaMode) noexcept {
   const auto hash = xxh3_hash(config);
   const auto info = build_shader_info(config);
   if (EnableDebugPrints && !g_seenShaders.contains(hash)) {
@@ -1614,8 +1614,22 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
   if constexpr (EnableNormalVisualization) {
     fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
   }
+  std::string_view fragmentOutput = "@location(0) vec4f"sv;
+  std::string_view fragmentReturn = "prev"sv;
+  if (dstAlphaMode == DstAlphaMode::Replace) {
+    // The blend constant is the EFB's alpha.
+    fragmentFn += "\n    prev.a = 1.0;";
+  } else if (dstAlphaMode == DstAlphaMode::DualSource) {
+    uniformPre +=
+        "\nstruct FragmentOutput {\n"
+        "    @location(0) @blend_src(0) color: vec4f,\n"
+        "    @location(0) @blend_src(1) blend: vec4f,\n"
+        "}";
+    fragmentOutput = "FragmentOutput"sv;
+    fragmentReturn = "FragmentOutput(vec4f(prev.rgb, 1.0), prev)"sv;
+  }
 
-  const auto shaderSource = fmt::format(R"""(
+  auto shaderSource = fmt::format(R"""(
 fn bswap32(v: u32, le: bool) -> u32 {{
   if (le) {{
     return v;
@@ -1973,12 +1987,15 @@ fn vs_main(
 }}
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
-    return prev;
+fn fs_main(in: VertexOutput) -> {9} {{{6}{5}
+    return {10};
 }}
 )""",
                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
-                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre);
+                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragmentOutput, fragmentReturn);
+  if (dstAlphaMode == DstAlphaMode::DualSource) {
+    shaderSource.insert(0, "enable dual_source_blending;\n");
+  }
   if (EnableDebugPrints) {
     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
   }
@@ -1986,8 +2003,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
   return shaderSource;
 }
 
-wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
-  const auto shaderSource = build_shader_source(config);
+wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode dstAlphaMode) noexcept {
+  const auto shaderSource = build_shader_source(config, dstAlphaMode);
   const auto hash = xxh3_hash(config);
   wgpu::ShaderSourceWGSL wgslDescriptor{};
   wgslDescriptor.code = shaderSource.c_str();
