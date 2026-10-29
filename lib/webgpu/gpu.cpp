@@ -841,7 +841,8 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
       const auto feature = supportedFeatures.features[i];
       if (feature == wgpu::FeatureName::CoreFeaturesAndLimits || feature == wgpu::FeatureName::TextureCompressionBC ||
           feature == wgpu::FeatureName::TextureCompressionASTC ||
-          feature == wgpu::FeatureName::TextureComponentSwizzle) {
+          feature == wgpu::FeatureName::TextureComponentSwizzle ||
+          feature == wgpu::FeatureName::ImplicitDeviceSynchronization) {
         if (feature == wgpu::FeatureName::CoreFeaturesAndLimits) {
           g_hasCoreFeatures = true;
         } else if (feature == wgpu::FeatureName::TextureCompressionBC) {

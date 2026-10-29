@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include <SDL3/SDL_iostream.h>
 #include <absl/container/flat_hash_map.h>
@@ -54,7 +55,7 @@ struct SdlVfsSqliteFile {
 };
 
 static std::mutex g_pipelineMutex;
-static std::thread g_pipelineThread;
+static std::vector<std::thread> g_pipelineThreads;
 static std::atomic_bool g_pipelineThreadEnd = false;
 static std::condition_variable g_pipelineQueueCv;
 static std::condition_variable g_pipelineReadyCv;
@@ -894,17 +895,13 @@ static void pipeline_cache_writer() {
 }
 
 static void pipeline_worker() {
-
-  bool hasMore = false;
   while (true) {
     PendingPipeline pending;
     {
       std::unique_lock lock{g_pipelineMutex};
-      if (!hasMore) {
-        g_pipelineQueueCv.wait(lock, [] {
-          return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
-        });
-      }
+      g_pipelineQueueCv.wait(lock, [] {
+        return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
+      });
       if (g_pipelineThreadEnd) {
         break;
       }
@@ -920,7 +917,6 @@ static void pipeline_worker() {
                                                 .firstFrameUsed = pending.firstFrameUsed,
                                             });
       g_pendingPipelines.erase(pending.hash);
-      hasMore = !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty();
     }
     notify_pipeline_ready(true);
   }
@@ -956,7 +952,9 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
 
     PipelineConfig config;
     std::memcpy(&config, configBlob, sizeof(config));
-    if (config.version != configVersion) {
+    // A pipeline for another MSAA sample count is never bound in this run.
+    if (config.version != configVersion ||
+        (config.msaaSamples != 1 && config.msaaSamples != webgpu::g_graphicsConfig.msaaSamples)) {
       continue;
     }
 
@@ -1031,11 +1029,17 @@ void initialize_pipeline_cache() {
   g_pipelineThreadEnd = false;
   g_gpuCachePrunePending = false;
 
-  g_pipelineThread = std::thread(pipeline_worker);
+  // Compiles run in parallel, leaving a core for the game and one for the
+  // render thread.
+  const unsigned workerCount = std::clamp(std::thread::hardware_concurrency(), 3u, 10u) - 2;
+  for (unsigned i = 0; i < workerCount; ++i) {
+    g_pipelineThreads.emplace_back(pipeline_worker);
+  }
 
   const size_t loadedCount = load_pipeline_cache();
   if (!g_pipelineCacheBroken && loadedCount > 0) {
     g_gpuCachePrunePending = true;
+    g_pipelineQueueCv.notify_all();
   }
 
   if (!g_pipelineCacheBroken) {
@@ -1044,12 +1048,13 @@ void initialize_pipeline_cache() {
 }
 
 void shutdown_pipeline_cache() {
-  if (g_pipelineThread.joinable()) {
-    g_pipelineThreadEnd = true;
-    g_pipelineQueueCv.notify_all();
-    g_pipelineReadyCv.notify_all();
-    g_pipelineThread.join();
+  g_pipelineThreadEnd = true;
+  g_pipelineQueueCv.notify_all();
+  g_pipelineReadyCv.notify_all();
+  for (auto& thread : g_pipelineThreads) {
+    thread.join();
   }
+  g_pipelineThreads.clear();
 
   stop_pipeline_cache_writer();
   pipeline_cache_abort();

@@ -1310,6 +1310,7 @@ static bool bind_pipeline_on(PipelineRef ref, const Encoder& pass) {
   }
   wgpu::RenderPipeline pipeline;
   if (!get_pipeline(ref, pipeline)) {
+    ++g_stats.skippedDraws;
     return false;
   }
   pass.SetPipeline(pipeline);

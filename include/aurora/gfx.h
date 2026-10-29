@@ -31,6 +31,9 @@ typedef struct {
   // late, and presents more than half an interval after the one before.
   uint32_t interpStarved;
   uint32_t interpLatePresents;
+  // Running total of draws encoded while their pipeline was still compiling
+  // (skipped: the pop-in).
+  uint32_t skippedDraws;
 } AuroraStats;
 
 const AuroraStats* aurora_get_stats();
