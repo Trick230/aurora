@@ -327,6 +327,48 @@ static std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const Shade
   }
 }
 
+// From upstream 4998dcc: a register a clamped stage last wrote holds 0..1, which
+// tev_overflow leaves as is; every other source (texture, rasterized color,
+// constants) is 0..1 too. Only the registers can read unclamped results.
+static bool tev_color_arg_is_normalized(GXTevColorArg arg, const std::array<bool, MaxTevRegs>& colorNormalized,
+                                        const std::array<bool, MaxTevRegs>& alphaNormalized) {
+  switch (arg) {
+  case GX_CC_CPREV:
+    return colorNormalized[GX_TEVPREV];
+  case GX_CC_APREV:
+    return alphaNormalized[GX_TEVPREV];
+  case GX_CC_C0:
+    return colorNormalized[GX_TEVREG0];
+  case GX_CC_A0:
+    return alphaNormalized[GX_TEVREG0];
+  case GX_CC_C1:
+    return colorNormalized[GX_TEVREG1];
+  case GX_CC_A1:
+    return alphaNormalized[GX_TEVREG1];
+  case GX_CC_C2:
+    return colorNormalized[GX_TEVREG2];
+  case GX_CC_A2:
+    return alphaNormalized[GX_TEVREG2];
+  default:
+    return true;
+  }
+}
+
+static bool tev_alpha_arg_is_normalized(GXTevAlphaArg arg, const std::array<bool, MaxTevRegs>& alphaNormalized) {
+  switch (arg) {
+  case GX_CA_APREV:
+    return alphaNormalized[GX_TEVPREV];
+  case GX_CA_A0:
+    return alphaNormalized[GX_TEVREG0];
+  case GX_CA_A1:
+    return alphaNormalized[GX_TEVREG1];
+  case GX_CA_A2:
+    return alphaNormalized[GX_TEVREG2];
+  default:
+    return true;
+  }
+}
+
 static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view scale, std::string_view a,
                           std::string_view b, std::string_view c, std::string_view d, std::string_view zero) {
   switch (op) {
@@ -367,24 +409,22 @@ static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view sc
   }
 }
 
+// a, b and c come overflowed (or known not to need it).
 static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
                                 std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
-  const auto overflow = [](std::string_view reg) { return fmt::format("tev_overflow_vec3f({})", reg); };
-  std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "vec3(0)"sv);
+  std::string expr = tev_op(op, bias, scale, a, b, c, d, "vec3(0)"sv);
   return clamp ? fmt::format("clamp({}, vec3f(0.0), vec3f(1.0))", expr)
                : fmt::format("clamp({}, vec3f(-4.0), vec3f(4.0))", expr);
 }
 
-// The packed comparisons (R8, GR16, BGR24) compare color operands: a and b come
-// already overflowed, as vec3f.
+// The packed comparisons (R8, GR16, BGR24) compare color operands: a and b are
+// vec3f.
 static bool tev_alpha_compares_color(GXTevOp op) { return op >= GX_TEV_COMP_R8_GT && op <= GX_TEV_COMP_BGR24_EQ; }
 
+// a, b and c come overflowed (or known not to need it).
 static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
                                 std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
-  const auto overflow = [](std::string_view reg) { return fmt::format("tev_overflow_f32({})", reg); };
-  const bool packed = tev_alpha_compares_color(op);
-  std::string expr = tev_op(op, bias, scale, packed ? std::string(a) : overflow(a), packed ? std::string(b) : overflow(b),
-                            overflow(c), d, "0.0"sv);
+  std::string expr = tev_op(op, bias, scale, a, b, c, d, "0.0"sv);
   return clamp ? fmt::format("clamp({}, 0.0, 1.0)", expr) : fmt::format("clamp({}, -4.0, 4.0)", expr);
 }
 
@@ -1050,35 +1090,50 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
   std::string fragmentFn;
 
   static std::array regName{"prev"sv, "tevreg0"sv, "tevreg1"sv, "tevreg2"sv};
+  // Whether each register holds 0..1 (a clamped stage wrote it last).
+  std::array<bool, MaxTevRegs> colorNormalized{};
+  std::array<bool, MaxTevRegs> alphaNormalized{};
   for (u32 idx = 0; idx < config.tevStageCount; ++idx) {
     const auto& stage = config.tevStages[idx];
+    const auto color_arg = [&](GXTevColorArg arg) {
+      auto value = color_arg_reg(arg, idx, config, stage);
+      return tev_color_arg_is_normalized(arg, colorNormalized, alphaNormalized)
+                 ? fmt::format("vec3f({})", value)
+                 : fmt::format("tev_overflow_vec3f({})", value);
+    };
+    const auto alpha_arg = [&](GXTevAlphaArg arg) {
+      auto value = alpha_arg_reg(arg, idx, config, stage);
+      return tev_alpha_arg_is_normalized(arg, alphaNormalized) ? value : fmt::format("tev_overflow_f32({})", value);
+    };
     // A packed alpha comparison reads color A and B from before this stage
     // writes its color result.
     const bool alphaCompareColor = tev_alpha_compares_color(stage.alphaOp.op);
     if (alphaCompareColor) {
-      fragmentFn += fmt::format("\n    let tev_cmp_a{0} = tev_overflow_vec3f({1});"
-                                "\n    let tev_cmp_b{0} = tev_overflow_vec3f({2});",
-                                idx, color_arg_reg(stage.colorPass.a, idx, config, stage),
-                                color_arg_reg(stage.colorPass.b, idx, config, stage));
+      fragmentFn += fmt::format("\n    let tev_cmp_a{0} = {1};"
+                                "\n    let tev_cmp_b{0} = {2};",
+                                idx, color_arg(stage.colorPass.a), color_arg(stage.colorPass.b));
     }
     {
       std::string_view outReg = regName[stage.colorOp.outReg];
-      std::string op = tev_color_op(
-          stage.colorOp.op, tev_bias(stage.colorOp.bias), tev_scale(stage.colorOp.scale), stage.colorOp.clamp,
-          color_arg_reg(stage.colorPass.a, idx, config, stage), color_arg_reg(stage.colorPass.b, idx, config, stage),
-          color_arg_reg(stage.colorPass.c, idx, config, stage), color_arg_reg(stage.colorPass.d, idx, config, stage));
+      std::string op = tev_color_op(stage.colorOp.op, tev_bias(stage.colorOp.bias), tev_scale(stage.colorOp.scale),
+                                    stage.colorOp.clamp, color_arg(stage.colorPass.a), color_arg(stage.colorPass.b),
+                                    color_arg(stage.colorPass.c), color_arg_reg(stage.colorPass.d, idx, config, stage));
       fragmentFn += fmt::format("\n    // TEV stage {2}\n    {0} = vec4f({1}, {0}.a);", outReg, op, idx);
     }
     {
       std::string_view outReg = regName[stage.alphaOp.outReg];
       std::string op = tev_alpha_op(
           stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale), stage.alphaOp.clamp,
-          alphaCompareColor ? fmt::format("tev_cmp_a{}", idx) : alpha_arg_reg(stage.alphaPass.a, idx, config, stage),
-          alphaCompareColor ? fmt::format("tev_cmp_b{}", idx) : alpha_arg_reg(stage.alphaPass.b, idx, config, stage),
-          alpha_arg_reg(stage.alphaPass.c, idx, config, stage), alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
+          alphaCompareColor ? fmt::format("tev_cmp_a{}", idx) : alpha_arg(stage.alphaPass.a),
+          alphaCompareColor ? fmt::format("tev_cmp_b{}", idx) : alpha_arg(stage.alphaPass.b),
+          alpha_arg(stage.alphaPass.c), alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
       fragmentFn += fmt::format("\n    {0}.a = {1};", outReg, op);
     }
+    colorNormalized[stage.colorOp.outReg] = stage.colorOp.clamp;
+    alphaNormalized[stage.alphaOp.outReg] = stage.alphaOp.clamp;
   }
+  bool prevColorNormalized = false;
+  bool prevAlphaNormalized = false;
 
   {
     // GXRuntime recomp patch (0006): zero TEV stages is invalid (SDK state
@@ -1094,6 +1149,10 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
     }
     const u32 lastStageIdx = config.tevStageCount != 0 ? config.tevStageCount - 1 : 0;
     const auto& lastStage = config.tevStages[lastStageIdx];
+    if (config.tevStageCount != 0) {
+      prevColorNormalized = colorNormalized[lastStage.colorOp.outReg];
+      prevAlphaNormalized = alphaNormalized[lastStage.alphaOp.outReg];
+    }
     if (lastStage.colorOp.outReg != 0) {
       fragmentFn += fmt::format("\n    prev = vec4f({0}.rgb, prev.a);", regName[lastStage.colorOp.outReg]);
     }
@@ -1575,7 +1634,13 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
         "var tex{0}_samp: sampler;",
         i, i * 2, i * 2 + 1);
   }
-  fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
+  if (!prevColorNormalized && !prevAlphaNormalized) {
+    fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
+  } else if (!prevColorNormalized) {
+    fragmentFn += "\n    prev = vec4f(tev_overflow_vec3f(prev.rgb), prev.a);";
+  } else if (!prevAlphaNormalized) {
+    fragmentFn += "\n    prev.a = tev_overflow_f32(prev.a);";
+  }
   if (config.alphaCompare) {
     const auto comp0 = alpha_compare(config.alphaCompare.comp0, config.alphaCompare.ref0);
     const auto comp1 = alpha_compare(config.alphaCompare.comp1, config.alphaCompare.ref1);
