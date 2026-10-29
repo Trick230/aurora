@@ -22,6 +22,10 @@
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
 static u32 s_display_list_depth = 0;
+// The camera the draws are built with (see recomp::HostViewOpcode), for the
+// frame it was given in.
+static u16 s_viewCamera = 0;
+static u32 s_viewFrame = UINT32_MAX;
 static constexpr u32 MaxDisplayListDepth = 16;
 
 // Triangle-list indices for a primitive's vertices, appended to buf. The
@@ -479,6 +483,20 @@ void process(const u8* data, u32 size, bool bigEndian) {
 
     case CP_CMD_INVAL_VTX: {
       invalidate_array_uploads();
+      break;
+    }
+
+    case recomp::HostViewOpcode: {
+      CHECK(pos + recomp::HostViewSize - 1 <= size, "host view read overrun");
+      if (gfx::interp::enabled()) {
+        gfx::interp::ViewMatrix view;
+        for (u32 i = 0; i < view.size(); ++i) {
+          view[i] = read_f32(data + pos + i * 4, true);
+        }
+        s_viewCamera = gfx::interp::record_camera(view);
+        s_viewFrame = gfx::current_frame();
+      }
+      pos += recomp::HostViewSize - 1;
       break;
     }
 
@@ -2073,6 +2091,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         .sources = g_gxState.pnMtxSource,
         .lights = layout.lights,
         .post = layout.post,
+        .camera = s_viewFrame == gfx::current_frame() ? s_viewCamera : u16{0},
     });
   }
   gfx::push_draw_command(DrawData{
@@ -2126,6 +2145,9 @@ u32 packet_size(const u8* data, u32 size) {
     break;
   case CP_CMD_CALL_DL:
     need = 9;
+    break;
+  case recomp::HostViewOpcode:
+    need = recomp::HostViewSize;
     break;
   default: {
     if (cmd < 0x80) {

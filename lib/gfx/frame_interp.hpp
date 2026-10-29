@@ -12,6 +12,12 @@
 // land in different matrix slots each frame. A draw with no match, or whose
 // matrices moved too far to be the same object (a camera cut), is drawn as the
 // newer frame has it.
+//
+// A game can say which camera a pass of draws was built with (see
+// record_camera): those draws' objects are blended in the world and seen
+// through the camera's own move. Elsewhere the camera move is estimated from
+// the draws, and whether each object stands in the world or follows the
+// camera is guessed.
 
 #include "common.hpp"
 
@@ -39,6 +45,10 @@ struct BlockLayout {
   uint16_t post = 0;
 };
 
+// A view matrix, row-major 3x4 like GX position matrices: the world to eye
+// space.
+using ViewMatrix = std::array<float, 12>;
+
 struct DrawRecord {
   HashType key;   // pipeline, textures and sizes
   HashType group; // pipeline and textures, for draws whose sizes changed
@@ -47,6 +57,7 @@ struct DrawRecord {
   std::array<MatrixSources, MatrixSlots> sources;
   uint16_t lights;  // as in BlockLayout
   uint16_t post;
+  uint16_t camera;  // 1 + the frame's camera the draw's matrices were built with, 0 if unknown
 };
 
 // Encodes the retained frame's passes again into the encoder.
@@ -73,12 +84,15 @@ void discard();
 
 // Render thread, while recording: notes a GX draw's uniform block.
 void record_draw(const DrawRecord& record);
+// Render thread, while recording: notes a camera of the frame, returning the
+// value for DrawRecord::camera.
+uint16_t record_camera(const ViewMatrix& view);
 
 // Render worker: a frame was recorded. uniforms is a CPU copy of its uniform
 // stream; submit is called once the frame before it has been fully shown (its
 // replays need the GPU buffers as that frame left them), then it is replayed;
 // present finishes an encoder, submits it and presents.
-void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, ReplayFn replay, EndFrameCallback present,
-                SubmitFn submit);
+void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, std::vector<ViewMatrix> cameras, ReplayFn replay,
+                EndFrameCallback present, SubmitFn submit);
 
 } // namespace aurora::gfx::interp

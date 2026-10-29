@@ -42,6 +42,16 @@ enum class StreamEvent : std::uint32_t {
   DisplayCopy,  // BP copy trigger to the XFB (GXCopyDisp); the frame is done
 };
 
+// Besides retail packets the stream may carry this host one, which hooks in a
+// recompiled game write through the write-gather pipe like any other: the
+// opcode, then a view matrix as 12 big-endian floats (row-major 3x4, the world
+// to eye space). The draws after it, up to the next one or the frame's end,
+// had their matrices built with that camera; frame interpolation then blends
+// their objects in the world and follows the camera's own move. No retail
+// opcode has these bits.
+constexpr std::uint8_t HostViewOpcode = 0x70;
+constexpr std::uint32_t HostViewSize = 1 + 12 * 4;
+
 // Processes the complete packets at the front of a big-endian retail FIFO
 // stream, as the hardware command processor would, and returns how many bytes
 // it consumed; whatever is left is the start of a packet still being written.

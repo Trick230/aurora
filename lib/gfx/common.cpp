@@ -217,6 +217,7 @@ struct FramePacket {
   // draws' blocks in it.
   ByteBuffer uniformShadow;
   std::vector<interp::DrawRecord> interpDraws;
+  std::vector<interp::ViewMatrix> interpCameras;
 };
 
 static std::array<FramePacket, FrameSlotCount> g_framePackets;
@@ -932,9 +933,10 @@ void end_frame(EndFrameCallback callback) {
       g_lastUniformShadowSize = packet.uniformShadow.size();
       auto uniforms = std::move(packet.uniformShadow);
       auto draws = std::move(packet.interpDraws);
+      auto cameras = std::move(packet.interpCameras);
       packet = {};
       interp::push_frame(
-          std::move(uniforms), std::move(draws), [retained](wgpu::CommandEncoder& cmd) { replay_frame(cmd, *retained); },
+          std::move(uniforms), std::move(draws), std::move(cameras), [retained](wgpu::CommandEncoder& cmd) { replay_frame(cmd, *retained); },
           std::move(callback), [frameSlot, stagingSlot, encoder = std::move(encoder), stats]() mutable {
             const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Frame command buffer"};
             const auto buffer = encoder.Finish(&cmdBufDescriptor);
@@ -1157,6 +1159,12 @@ static void replay_frame(wgpu::CommandEncoder& cmd, FramePacket& frame) {
 }
 
 void interp::record_draw(const DrawRecord& record) { current_frame_packet().interpDraws.push_back(record); }
+
+uint16_t interp::record_camera(const ViewMatrix& view) {
+  auto& cameras = current_frame_packet().interpCameras;
+  cameras.push_back(view);
+  return static_cast<uint16_t>(std::min<size_t>(cameras.size(), UINT16_MAX));
+}
 
 void gpu_synchronize() { render_worker::synchronize(); }
 

@@ -74,6 +74,7 @@ static_assert(matrix_start(gx::MaxPnMtx + 1) == TexMtx && matrix_start(gx::MaxPn
 struct Frame {
   ByteBuffer uniforms;
   std::vector<DrawRecord> draws;
+  std::vector<ViewMatrix> cameras;
   ReplayFn replay;
   EndFrameCallback present;
   SubmitFn submit;
@@ -104,6 +105,7 @@ struct Blend {
   // with the camera.
   bool cameraRotation = false;
   Follow cameraTranslation = Follow::Eye;
+  uint16_t camera = 0; // the camera move it follows, in g_moves
   // Where the block's lights and post matrices are (0: none), and the floats
   // of it g_older holds.
   uint16_t lights = 0;
@@ -253,8 +255,9 @@ float distance2(const Vec3& a, const Vec3& b) {
 
 float length2(const Vec3& a) { return a[0] * a[0] + a[1] * a[1] + a[2] * a[2]; }
 
-// The camera move between the two frames: the map from the older frame's eye
-// space to the newer one's.
+// The camera move between the two frames that the draw being matched follows
+// (see use_camera): the map from the older frame's eye space to the newer
+// one's.
 Affine g_camera = Identity;
 Affine g_cameraInverse = Identity;
 bool g_cameraMoved = false;
@@ -332,6 +335,61 @@ Affine screw_at(const Screw& screw, float s) {
     out[row * 4 + 3] = c[row] - (rr[0] * c[0] + rr[1] * c[1] + rr[2] * c[2]) * scale + screw.shift[row] * s;
   }
   return out;
+}
+
+// A camera move between the two frames, and its screw.
+struct CameraMove {
+  Affine move = Identity;
+  Affine inverse = Identity;
+  bool moved = false;
+  Screw screw;
+  Affine screwError{};
+};
+// 0: the move estimated from the draws; 1 + n: camera n of both frames, as
+// the game gave it.
+std::vector<CameraMove> g_moves;
+
+CameraMove make_move(const Affine& move) {
+  CameraMove out;
+  out.move = move;
+  out.moved = move != Identity && invert(move.data(), out.inverse);
+  if (!out.moved) {
+    out.move = out.inverse = Identity;
+    return out;
+  }
+  out.screw = make_screw(out.inverse);
+  const Affine whole = screw_at(out.screw, 1.f);
+  for (int q = 0; q < 12; ++q) {
+    out.screwError[q] = out.inverse[q] - whole[q];
+  }
+  return out;
+}
+
+// The moves of the two frames' cameras, paired in the order the game gave them.
+void exact_cameras() {
+  g_moves.resize(1);
+  const size_t count = std::min(g_prev.cameras.size(), g_cur.cameras.size());
+  for (size_t n = 0; n < count; ++n) {
+    Affine inverse;
+    if (!invert(g_prev.cameras[n].data(), inverse)) {
+      inverse = Identity;
+    }
+    g_moves.push_back(make_move(compose(g_cur.cameras[n].data(), inverse.data())));
+  }
+}
+
+// The camera move a draw of the newer frame follows: its own camera's, else
+// the estimated one.
+uint16_t camera_of(const DrawRecord& draw) { return draw.camera < g_moves.size() ? draw.camera : 0; }
+
+// Makes the move the helpers below use the given one.
+void use_camera(uint16_t camera) {
+  const auto& move = g_moves[camera];
+  g_camera = move.move;
+  g_cameraInverse = move.inverse;
+  g_cameraMoved = move.moved;
+  g_screw = move.screw;
+  g_screwError = move.screwError;
 }
 
 struct Slot {
@@ -414,7 +472,7 @@ std::vector<std::pair<uint32_t, uint32_t>> g_samples;
 // Draws whose key occurs once in both frames are surely the same object; the
 // camera move is the one most of them agree on, as most of a scene stands still.
 void estimate_camera() {
-  g_camera = Identity;
+  Affine camera = Identity;
   g_curCounts.clear();
   for (const auto& draw : g_cur.draws) {
     ++g_curCounts[draw.key];
@@ -451,20 +509,11 @@ void estimate_camera() {
     }
     if (votes > bestVotes) {
       bestVotes = votes;
-      g_camera = candidate;
+      camera = candidate;
     }
   }
-  if (bestVotes < 3) {
-    g_camera = Identity;
-  }
-  g_cameraMoved = g_camera != Identity && invert(g_camera.data(), g_cameraInverse);
-  if (g_cameraMoved) {
-    g_screw = make_screw(g_cameraInverse);
-    const Affine whole = screw_at(g_screw, 1.f);
-    for (int q = 0; q < 12; ++q) {
-      g_screwError[q] = g_cameraInverse[q] - whole[q];
-    }
-  }
+  g_moves.resize(1);
+  g_moves[0] = make_move(bestVotes < 3 ? Identity : camera);
 }
 
 // How far, squared, a draw at target may have moved to pair with the closest
@@ -762,11 +811,15 @@ std::vector<uint32_t> g_unmatched;
 // space its older matrices are its newer ones. Not for screen-space draws,
 // whose projection is orthographic.
 void reproject(const DrawRecord& draw, const float* b) {
+  const uint16_t camera = camera_of(draw);
+  use_camera(camera);
   if (!g_cameraMoved || b[15] != 0.f || !g_blocks.insert(draw.offset).second) {
     return;
   }
   Modes modes{true, Follow::World};
-  if (const auto it = g_keyModes.find(draw.key); it != g_keyModes.end()) {
+  if (camera != 0) {
+    // In the world, seen through its camera.
+  } else if (const auto it = g_keyModes.find(draw.key); it != g_keyModes.end()) {
     modes = it->second;
   } else if (const auto group = g_groupModes.find(draw.group); group != g_groupModes.end()) {
     modes = group->second;
@@ -775,6 +828,7 @@ void reproject(const DrawRecord& draw, const float* b) {
     modes.rotation = false;
   }
   Blend item{draw.offset / 4, 0, PnMask, {}, modes.rotation, modes.translation};
+  item.camera = camera;
   item.prevOffset = static_cast<uint32_t>(g_older.size());
   g_older.insert(g_older.end(), b, b + BlendFloats);
   g_blends.push_back(item);
@@ -863,6 +917,7 @@ void match() {
   build_identities(g_byGroupIdentity, prev);
   g_used.assign(prev.size(), 0);
   estimate_camera();
+  exact_cameras();
   const auto* prevBase = reinterpret_cast<const float*>(g_prev.uniforms.data());
   const auto* curBase = reinterpret_cast<const float*>(g_cur.uniforms.data());
   const size_t prevSize = g_prev.uniforms.size();
@@ -877,6 +932,7 @@ void match() {
       if (g_pairs[i] != NoMatch || draw.offset + BlendBytes > curSize) {
         continue;
       }
+      use_camera(camera_of(draw));
       const float* mtx = current_matrix(curBase, draw);
       uint32_t j = pick_identity(g_byKeyIdentity, draw, prevBase, mtx, exact);
       if (j == NoMatch) {
@@ -907,6 +963,8 @@ void match() {
       continue;
     }
     const auto& other = prev[j];
+    const uint16_t camera = camera_of(draw);
+    use_camera(camera);
     // Draws with the same GX state share a uniform block; the first match
     // blends it.
     if (draw.offset + BlendBytes > curSize || other.offset + BlendBytes > prevSize ||
@@ -916,6 +974,7 @@ void match() {
     const float* a = prevBase + other.offset / 4;
     const float* b = curBase + draw.offset / 4;
     Blend item{draw.offset / 4, other.offset / 4, 0, {}};
+    item.camera = camera;
     if (other.lights == draw.lights && other.post == draw.post) {
       const uint32_t extent = std::max({BlendFloats, draw.lights != 0 ? draw.lights + LightsFloats : 0u,
                                         draw.post != 0 ? draw.post + PostFloats : 0u});
@@ -952,9 +1011,14 @@ void match() {
     // camera (sky, effects around the player), as it is.
     const float* currentA = a + prev_start(item, 1 + draw.current);
     const float* currentB = b + matrix_start(1 + draw.current);
-    // Whichever of the two explains the move better, for its rotation and
-    // its translation each.
-    if (g_cameraMoved) {
+    if (camera != 0) {
+      // Built with a camera the game gave: wherever the object goes, it goes
+      // there in the world.
+      item.cameraRotation = g_cameraMoved;
+      item.cameraTranslation = g_cameraMoved ? Follow::World : Follow::Eye;
+    } else if (g_cameraMoved) {
+      // Whichever of the two explains the move better, for its rotation and
+      // its translation each.
       const Affine moved = compose(g_camera.data(), currentA);
       item.cameraRotation = rotation_distance2(moved.data(), currentB) < rotation_distance2(currentA, currentB);
       Affine turn = g_camera;
@@ -1000,7 +1064,7 @@ void match() {
       continue;
     }
     store_older(item, a);
-    if (g_cameraMoved) {
+    if (g_cameraMoved && camera == 0) {
       const Modes modes{item.cameraRotation, item.cameraTranslation};
       g_keyModes.insert_or_assign(draw.key, modes);
       g_groupModes.insert_or_assign(draw.group, modes);
@@ -1036,24 +1100,38 @@ inline void renormalize(float* m, const float* a, const float* b, float t) {
   }
 }
 
+struct WayBack {
+  Affine back;
+  Affine rotation;
+  Affine inverse;
+};
+std::vector<WayBack> g_backs;
+
 // Writes the blended uniform stream at t into g_buffer.
 void blend(float t) {
   auto* dst = reinterpret_cast<float*>(g_scratch.data());
   const auto* curBase = reinterpret_cast<const float*>(g_cur.uniforms.data());
-  // The way back from the newer eye space to the one at t.
-  Affine back = Identity;
-  if (g_cameraMoved) {
-    back = screw_at(g_screw, 1.f - t);
-    for (int q = 0; q < 12; ++q) {
-      back[q] += g_screwError[q] * (1.f - t);
+  // For each camera move, the way back from the newer eye space to the one at
+  // t: as a whole, its rotation alone, and its inverse.
+  g_backs.resize(g_moves.size());
+  for (size_t k = 0; k < g_moves.size(); ++k) {
+    const auto& move = g_moves[k];
+    auto& way = g_backs[k];
+    way.back = Identity;
+    way.inverse = Identity;
+    if (move.moved) {
+      way.back = screw_at(move.screw, 1.f - t);
+      for (int q = 0; q < 12; ++q) {
+        way.back[q] += move.screwError[q] * (1.f - t);
+      }
+      if (!invert(way.back.data(), way.inverse)) {
+        way.inverse = Identity;
+      }
     }
-  }
-  const Affine backRotation = turn_of(back);
-  Affine backInverse = Identity;
-  if (g_cameraMoved && !invert(back.data(), backInverse)) {
-    backInverse = Identity;
+    way.rotation = turn_of(way.back);
   }
   for (const auto& item : g_blends) {
+    const auto& [back, backRotation, backInverse] = g_backs[item.camera];
     float* out = dst + item.offset;
     const float* a = g_older.data() + item.prevOffset;
     const float* b = curBase + item.offset;
@@ -1442,8 +1520,8 @@ bool enabled() noexcept { return g_enabled; }
 
 bool replaying() noexcept { return g_replaying.load(std::memory_order_relaxed); }
 
-void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, ReplayFn replay, EndFrameCallback present,
-                SubmitFn submit) {
+void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, std::vector<ViewMatrix> cameras, ReplayFn replay,
+                EndFrameCallback present, SubmitFn submit) {
   const auto now = Clock::now();
   if (g_lastArrival != Clock::time_point{}) {
     const auto delta = now - g_lastArrival;
@@ -1456,7 +1534,8 @@ void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, ReplayFn rep
     // The game got ahead of the replays: drop the rest of the frame shown.
     activate(g_base + g_period);
   }
-  g_next = Frame{std::move(uniforms), std::move(draws), std::move(replay), std::move(present), std::move(submit), now};
+  g_next = Frame{std::move(uniforms), std::move(draws), std::move(cameras), std::move(replay), std::move(present),
+                 std::move(submit), now};
   std::lock_guard lock{g_mutex};
   if (!g_cur.replay || !g_pending) {
     // Nothing left to show of the frame before: start on this one, a little
