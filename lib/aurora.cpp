@@ -84,6 +84,9 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   if (g_config.maxTextureAnisotropy == 0) {
     g_config.maxTextureAnisotropy = 16;
   }
+  if (!(g_config.renderScale > 0.f)) {
+    g_config.renderScale = 1.f;
+  }
   ASSERT(window::initialize(), "Error initializing window");
 
   g_sdlCustomEventsStart = SDL_RegisterEvents(1);

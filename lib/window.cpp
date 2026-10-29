@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <vector>
 
 namespace aurora::window {
@@ -253,6 +254,10 @@ AuroraWindowSize get_window_size() {
     const auto [fitW, fitH] = fit_frame_buffer_to_aspect(fb_w, fb_h, g_config.displayAspect);
     fb_w = fitW;
     fb_h = fitH;
+  }
+  if (g_config.renderScale != 1.f) {
+    fb_w = std::max(1, static_cast<int>(std::lround(fb_w * g_config.renderScale)));
+    fb_h = std::max(1, static_cast<int>(std::lround(fb_h * g_config.renderScale)));
   }
 
   return {

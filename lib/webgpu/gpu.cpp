@@ -45,7 +45,6 @@ TextureWithSampler g_depthBuffer;
 static wgpu::BindGroupLayout g_CopyBindGroupLayout;
 wgpu::RenderPipeline g_CopyPipeline;
 wgpu::BindGroup g_CopyBindGroup;
-static constexpr AuroraSampler g_Resampler = SAMPLER_BILINEAR;
 static wgpu::BindGroupLayout g_ResampleBindGroupLayout;
 static wgpu::RenderPipeline g_ResamplePipeline;
 static wgpu::Buffer g_ResampleUniformBuffer;
@@ -143,27 +142,21 @@ fn sample_area(frag_position: vec4<f32>) -> vec4<f32> {
 
     let first_pixel = vec2<i32>(floor(source_min));
     let last_pixel = vec2<i32>(ceil(source_max));
-    let max_iterations: i32 = 16;
+    // Only the pixels the footprint covers (at most 16 a side).
+    let end_pixel = min(last_pixel, first_pixel + vec2<i32>(16, 16));
 
     var avg_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     var total_weight = 0.0;
 
-    for (var iy: i32 = 0; iy < max_iterations; iy = iy + 1) {
-        let source_y = first_pixel.y + iy;
-        if (source_y < last_pixel.y) {
-            let y0 = f32(source_y);
-            let weight_y = max(min(source_max.y, y0 + 1.0) - max(source_min.y, y0), 0.0);
-
-            for (var ix: i32 = 0; ix < max_iterations; ix = ix + 1) {
-                let source_x = first_pixel.x + ix;
-                if (source_x < last_pixel.x) {
-                    let x0 = f32(source_x);
-                    let weight_x = max(min(source_max.x, x0 + 1.0) - max(source_min.x, x0), 0.0);
-                    let weight = weight_x * weight_y;
-                    avg_color += weight * sample_by_pixel(vec2<i32>(source_x, source_y));
-                    total_weight += weight;
-                }
-            }
+    for (var source_y: i32 = first_pixel.y; source_y < end_pixel.y; source_y = source_y + 1) {
+        let y0 = f32(source_y);
+        let weight_y = max(min(source_max.y, y0 + 1.0) - max(source_min.y, y0), 0.0);
+        for (var source_x: i32 = first_pixel.x; source_x < end_pixel.x; source_x = source_x + 1) {
+            let x0 = f32(source_x);
+            let weight_x = max(min(source_max.x, x0 + 1.0) - max(source_min.x, x0), 0.0);
+            let weight = weight_x * weight_y;
+            avg_color += weight * sample_by_pixel(vec2<i32>(source_x, source_y));
+            total_weight += weight;
         }
     }
 
@@ -595,13 +588,20 @@ const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& en
   const auto& source = present_source();
   const uint32_t width = viewport_extent(viewport.width);
   const uint32_t height = viewport_extent(viewport.height);
+  // A frame already at the window's size goes straight to the present copy.
+  if (source.size.width == width && source.size.height == height) {
+    return source;
+  }
   if (!g_resampledFrameBuffer.view || g_resampledFrameBuffer.size.width != width ||
       g_resampledFrameBuffer.size.height != height || g_resampledFrameBuffer.format != source.format) {
     g_resampledFrameBuffer = create_render_texture(width, height, false);
   }
 
   const ResampleUniformBlock uniform{
-      .samplerMode = sampler_mode(g_Resampler),
+      // Rendered above the window (render scale): an area filter averages
+      // every pixel each output pixel covers; bilinear only reads four.
+      .samplerMode = sampler_mode(source.size.width > width || source.size.height > height ? SAMPLER_AREA
+                                                                                           : SAMPLER_BILINEAR),
       .frameWidth = static_cast<float>(width),
       .frameHeight = static_cast<float>(height),
   };

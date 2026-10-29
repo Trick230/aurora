@@ -862,7 +862,9 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
   const bool mipsEnabled = mipFilter != wgpu::MipmapFilterMode::Undefined;
   float minLod = texObj.min_lod();
   float maxLod = texObj.max_lod();
-  u16 maxAnisotropy = wgpu_aniso(texObj.max_aniso());
+  u16 maxAnisotropy = aurora::g_config.forceTextureAnisotropy
+                          ? std::max<u16>(aurora::webgpu::g_graphicsConfig.textureAnisotropy, 1)
+                          : wgpu_aniso(texObj.max_aniso());
   if (ref && ref->isReplacement) {
     minLod = 0.f;
     maxLod = 1000.f;

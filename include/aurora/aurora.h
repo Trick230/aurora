@@ -73,6 +73,16 @@ typedef struct {
   AuroraBackend desiredBackend;
   uint32_t msaa;
   uint16_t maxTextureAnisotropy;
+  /**
+   * Filter every mipmapped texture at maxTextureAnisotropy, not only those the
+   * game asks anisotropy of.
+   */
+  bool forceTextureAnisotropy;
+  /**
+   * The frame buffer's size over the window's (0 = 1). Above 1 the frame is
+   * reduced to the window by an area filter, so every rendered pixel counts.
+   */
+  float renderScale;
   bool vsync;
   bool startFullscreen;
   bool pauseOnFocusLost;
