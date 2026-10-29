@@ -24,9 +24,11 @@ namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
 static u32 s_display_list_depth = 0;
 // The camera the draws are built with (see recomp::HostViewOpcode), for the
-// frame it was given in.
+// frame it was given in, and the projection the first of them drew with: a
+// draw projected otherwise was built with a camera of its own.
 static u16 s_viewCamera = 0;
 static u32 s_viewFrame = UINT32_MAX;
+static std::optional<Mat4x4<float>> s_viewProjection;
 // The position matrices the vertices of the draw being pushed use.
 static u16 s_vtxMatrices = 0;
 static constexpr u32 MaxDisplayListDepth = 16;
@@ -498,6 +500,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
         }
         s_viewCamera = gfx::interp::record_camera(view);
         s_viewFrame = gfx::current_frame();
+        s_viewProjection.reset();
       }
       pos += recomp::HostViewSize - 1;
       break;
@@ -2093,6 +2096,15 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
 
   if (gfx::interp::enabled()) {
+    u16 camera = 0;
+    if (s_viewFrame == gfx::current_frame() && g_gxState.proj.m3[3] == 0.f) {
+      if (!s_viewProjection) {
+        s_viewProjection = g_gxState.proj;
+      }
+      if (std::memcmp(&*s_viewProjection, &g_gxState.proj, sizeof(g_gxState.proj)) == 0) {
+        camera = s_viewCamera;
+      }
+    }
     Hasher hasher;
     hasher.update(pipeline);
     hasher.update(bindGroups.textureBindGroup);
@@ -2107,7 +2119,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         .sources = g_gxState.pnMtxSource,
         .lights = layout.lights,
         .post = layout.post,
-        .camera = s_viewFrame == gfx::current_frame() ? s_viewCamera : u16{0},
+        .camera = camera,
         .used = s_vtxMatrices != 0 ? s_vtxMatrices : static_cast<u16>(1u << std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1)),
     });
   }
