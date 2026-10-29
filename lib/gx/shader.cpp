@@ -1572,7 +1572,13 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       break;
     }
     const auto discard = alpha_compare_not(pass);
-    if (discard.constant == 1) {
+    if (config.alphaToCoverage) {
+      // Coverage from how far alpha is past the edge, in pixels: the cutout's
+      // edge spread over about one pixel's samples.
+      fragmentFn += fmt::format("\n    // Alpha to coverage"
+                                "\n    prev.a = clamp((prev.a - {:.6f}) / max(fwidth(prev.a), 0.0001) + 0.5, 0.0, 1.0);",
+                                alpha_cutout_threshold(config.alphaCompare));
+    } else if (discard.constant == 1) {
       fragmentFn += "\n    // Alpha compare\n    discard;";
     } else if (discard.constant != 0) {
       fragmentFn +=

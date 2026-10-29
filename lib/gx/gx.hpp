@@ -207,6 +207,38 @@ struct AlphaCompare {
   explicit operator bool() const { return comp0 != GX_ALWAYS || comp1 != GX_ALWAYS; }
 };
 static_assert(std::has_unique_object_representations_v<AlphaCompare>);
+
+// A cutout's alpha compare (alpha greater than, or at least, a reference; the
+// other comparison always passes under AND, never under OR): the alpha its
+// edge sits at, 0 to 1. -1 for any other compare.
+inline float alpha_cutout_threshold(const AlphaCompare& compare) {
+  if (compare.op != GX_AOP_AND && compare.op != GX_AOP_OR) {
+    return -1.f;
+  }
+  const bool always = compare.op == GX_AOP_AND;
+  const auto neutral = [always](GXCompare comp, u32 ref) {
+    if (always) {
+      return comp == GX_ALWAYS || (comp == GX_LEQUAL && ref == 255) || (comp == GX_GEQUAL && ref == 0);
+    }
+    return comp == GX_NEVER || (comp == GX_GREATER && ref == 255) || (comp == GX_LESS && ref == 0);
+  };
+  const auto threshold = [](GXCompare comp, u32 ref) {
+    if (comp == GX_GREATER) {
+      return (static_cast<float>(ref) + 0.5f) / 255.f;
+    }
+    if (comp == GX_GEQUAL) {
+      return (static_cast<float>(ref) - 0.5f) / 255.f;
+    }
+    return -1.f;
+  };
+  if (neutral(compare.comp1, compare.ref1)) {
+    return threshold(compare.comp0, compare.ref0);
+  }
+  if (neutral(compare.comp0, compare.ref0)) {
+    return threshold(compare.comp1, compare.ref1);
+  }
+  return -1.f;
+}
 struct IndTexMtxInfo {
   Mat3x2<float> mtx;
   s8 scaleExp = 0;
@@ -453,7 +485,10 @@ struct ShaderConfig {
   u8 fogType = GX_FOG_NONE;
   u8 vtxStride = 0;
   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
-  u8 pad1 : 6 = 0;
+  // MSAA, an unblended cutout and no alpha kept in the EFB: the alpha compare
+  // becomes coverage, so the cutout's edges are antialiased like triangles'.
+  u8 alphaToCoverage : 1 = 0;
+  u8 pad1 : 5 = 0;
   u8 pad2 = 0;
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;

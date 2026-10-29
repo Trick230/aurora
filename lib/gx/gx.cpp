@@ -573,6 +573,7 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
       .multisample =
           wgpu::MultisampleState{
               .count = config.msaaSamples,
+              .alphaToCoverageEnabled = config.shaderConfig.alphaToCoverage != 0,
           },
       .fragment = &fragmentState,
   };
@@ -680,6 +681,10 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       .alphaUpdate = g_gxState.alphaUpdate,
       .colorUpdate = g_gxState.colorUpdate,
   };
+  // The coverage alpha would replace the fragment's alpha in an EFB that keeps it.
+  const bool efbAlpha = g_gxState.alphaUpdate && g_gxState.pixelFmt == GX_PF_RGBA6_Z24;
+  config.shaderConfig.alphaToCoverage = config.msaaSamples > 1 && g_gxState.blendMode == GX_BM_NONE && !efbAlpha &&
+                                        alpha_cutout_threshold(g_gxState.alphaCompare) >= 0.f;
 }
 
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {

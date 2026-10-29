@@ -18,7 +18,7 @@ struct DrawData {
   GXCullMode cullMode;
 };
 
-constexpr uint32_t GXPipelineConfigVersion = 17;
+constexpr uint32_t GXPipelineConfigVersion = 18;
 struct PipelineConfig {
   uint32_t version = GXPipelineConfigVersion;
   uint32_t msaaSamples = 1;
