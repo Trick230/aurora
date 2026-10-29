@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include <SDL3/SDL_iostream.h>
@@ -952,10 +953,19 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
 
     PipelineConfig config;
     std::memcpy(&config, configBlob, sizeof(config));
-    // A pipeline for another MSAA sample count is never bound in this run.
-    if (config.version != configVersion ||
-        (config.msaaSamples != 1 && config.msaaSamples != webgpu::g_graphicsConfig.msaaSamples)) {
+    if (config.version != configVersion) {
       continue;
+    }
+    // A multisampled pipeline from a run with another sample count (a seed
+    // made with MSAA on, run with it off) becomes this run's: the passes that
+    // were multisampled are now single-sampled, and alpha to coverage needs
+    // samples.
+    const uint32_t samples = webgpu::g_graphicsConfig.msaaSamples;
+    if (config.msaaSamples != 1 && config.msaaSamples != samples) {
+      config.msaaSamples = samples;
+      if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
+        config.shaderConfig.alphaToCoverage = config.shaderConfig.alphaToCoverage && samples > 1;
+      }
     }
 
     find_pipeline_impl(type, config, [=] { return create(config); }, PipelinePriority::Background, firstFrameUsed);
