@@ -375,10 +375,16 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
                : fmt::format("clamp({}, vec3f(-4.0), vec3f(4.0))", expr);
 }
 
+// The packed comparisons (R8, GR16, BGR24) compare color operands: a and b come
+// already overflowed, as vec3f.
+static bool tev_alpha_compares_color(GXTevOp op) { return op >= GX_TEV_COMP_R8_GT && op <= GX_TEV_COMP_BGR24_EQ; }
+
 static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
                                 std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
   const auto overflow = [](std::string_view reg) { return fmt::format("tev_overflow_f32({})", reg); };
-  std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "0.0"sv);
+  const bool packed = tev_alpha_compares_color(op);
+  std::string expr = tev_op(op, bias, scale, packed ? std::string(a) : overflow(a), packed ? std::string(b) : overflow(b),
+                            overflow(c), d, "0.0"sv);
   return clamp ? fmt::format("clamp({}, 0.0, 1.0)", expr) : fmt::format("clamp({}, -4.0, 4.0)", expr);
 }
 
@@ -1046,6 +1052,15 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
   static std::array regName{"prev"sv, "tevreg0"sv, "tevreg1"sv, "tevreg2"sv};
   for (u32 idx = 0; idx < config.tevStageCount; ++idx) {
     const auto& stage = config.tevStages[idx];
+    // A packed alpha comparison reads color A and B from before this stage
+    // writes its color result.
+    const bool alphaCompareColor = tev_alpha_compares_color(stage.alphaOp.op);
+    if (alphaCompareColor) {
+      fragmentFn += fmt::format("\n    let tev_cmp_a{0} = tev_overflow_vec3f({1});"
+                                "\n    let tev_cmp_b{0} = tev_overflow_vec3f({2});",
+                                idx, color_arg_reg(stage.colorPass.a, idx, config, stage),
+                                color_arg_reg(stage.colorPass.b, idx, config, stage));
+    }
     {
       std::string_view outReg = regName[stage.colorOp.outReg];
       std::string op = tev_color_op(
@@ -1058,7 +1073,8 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       std::string_view outReg = regName[stage.alphaOp.outReg];
       std::string op = tev_alpha_op(
           stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale), stage.alphaOp.clamp,
-          alpha_arg_reg(stage.alphaPass.a, idx, config, stage), alpha_arg_reg(stage.alphaPass.b, idx, config, stage),
+          alphaCompareColor ? fmt::format("tev_cmp_a{}", idx) : alpha_arg_reg(stage.alphaPass.a, idx, config, stage),
+          alphaCompareColor ? fmt::format("tev_cmp_b{}", idx) : alpha_arg_reg(stage.alphaPass.b, idx, config, stage),
           alpha_arg_reg(stage.alphaPass.c, idx, config, stage), alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
       fragmentFn += fmt::format("\n    {0}.a = {1};", outReg, op);
     }
