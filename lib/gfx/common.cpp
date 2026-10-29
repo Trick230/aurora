@@ -656,10 +656,10 @@ void initialize() {
                     .type = wgpu::BufferBindingType::ReadOnlyStorage,
                 },
         },
-        // Storage data buffer
+        // Storage data buffer (the fragment stage reads the fog range table)
         wgpu::BindGroupLayoutEntry{
             .binding = 1,
-            .visibility = wgpu::ShaderStage::Vertex,
+            .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
             .buffer =
                 wgpu::BufferBindingLayout{
                     .type = wgpu::BufferBindingType::ReadOnlyStorage,

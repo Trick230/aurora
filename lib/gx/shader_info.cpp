@@ -1,6 +1,8 @@
 #include "shader_info.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 
 namespace aurora::gx {
@@ -320,6 +322,7 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     info.uniformSize += sizeof(Mat3x4<float>) * MaxPTTexMtx;
   if (config.fogType != GX_FOG_NONE) {
     info.usesFog = true;
+    info.usesFogRange = config.fogRangeEnabled;
     info.uniformSize += sizeof(Fog);
   }
   info.uniformSize += MaxTexCoord * sizeof(Vec4<float>);
@@ -372,6 +375,68 @@ static u32 line_texcoord_mask() noexcept {
   return mask;
 }
 
+namespace {
+// The range fog factor of each render target column, which only changes with
+// the fog's range registers, the viewport and the target: a table in the
+// frame's storage, pushed once a frame for each that a draw uses.
+struct FogRangeKey {
+  std::array<u16, 10> rangeK;
+  f32 center;
+  f32 renderWidth;
+  u32 targetWidth;
+
+  bool operator==(const FogRangeKey&) const = default;
+};
+struct FogRangeTable {
+  FogRangeKey key;
+  u32 base; // in abuf words
+};
+std::vector<FogRangeTable> s_fogRangeTables;
+u32 s_fogRangeFrame = UINT32_MAX;
+
+u32 fog_range_base() noexcept {
+  const auto& fog = g_gxState.fog;
+  const f32 logicalWidth = std::max(g_gxState.logicalViewport.width, 1.f);
+  const f32 renderWidth = std::max(g_gxState.renderViewport.width, 1.f);
+  const FogRangeKey key{
+      .rangeK = fog.rangeK,
+      // In clip space, offset by where the viewport sits in the target.
+      .center = (static_cast<f32>(fog.rangeCenter) - g_gxState.logicalViewport.left) / logicalWidth * 2.f - 1.f +
+                g_gxState.renderViewport.left / renderWidth * 2.f,
+      .renderWidth = renderWidth,
+      .targetWidth = gfx::get_render_target_size().x,
+  };
+  if (s_fogRangeFrame != gfx::current_frame()) {
+    s_fogRangeFrame = gfx::current_frame();
+    s_fogRangeTables.clear();
+  }
+  for (const auto& table : s_fogRangeTables) {
+    if (table.key == key) {
+      return table.base;
+    }
+  }
+  // The registers hold each pair high factor first.
+  std::array<f32, 10> k;
+  for (u32 i = 0; i < k.size(); ++i) {
+    k[i] = static_cast<f32>(key.rangeK[(i & ~1u) | (1u - (i & 1u))]) / 64.f;
+  }
+  static std::vector<f32> factors;
+  factors.resize(key.targetWidth);
+  for (u32 x = 0; x < key.targetWidth; ++x) {
+    const f32 offset = (static_cast<f32>(x) + 0.5f) / key.renderWidth * 2.f - 1.f - key.center;
+    const f32 index = std::clamp(9.f - std::abs(offset) * 9.f, 0.f, 9.f);
+    const u32 lower = static_cast<u32>(index);
+    const u32 upper = std::min(lower + 1, 9u);
+    const f32 fraction = index - static_cast<f32>(lower);
+    const f32 factor = std::max(k[lower] * (1.f - fraction) + k[upper] * fraction, 0.000001f);
+    factors[x] = std::sqrt(offset * offset + factor * factor) / factor;
+  }
+  const auto range = gfx::push_storage(reinterpret_cast<const u8*>(factors.data()), factors.size() * sizeof(f32));
+  s_fogRangeTables.push_back({key, static_cast<u32>(range.offset / sizeof(u32))});
+  return s_fogRangeTables.back().base;
+}
+} // namespace
+
 gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
                          gfx::interp::BlockLayout* layout) noexcept {
 
@@ -387,7 +452,8 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
   buf.append<f32>(g_gxState.renderViewport.height);
   buf.append<f32>(g_gxState.logicalViewport.width);
   buf.append<f32>(g_gxState.logicalViewport.height);
-  buf.append_zeroes(8); // pad
+  buf.append<u32>(info.usesFogRange ? fog_range_base() : 0u);
+  buf.append_zeroes(4); // pad
   for (const auto& vaRange : ranges.vaRanges) {
     buf.append<u32>(vaRange.offset);
   }

@@ -1521,9 +1521,17 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
         "}";
     uniBufAttrs += "\n    fog: Fog,";
 
-    fragmentFn +=
-        fmt::format("\n    // Fog\n    var fogF = clamp((ubuf.fog.a / (ubuf.fog.b - {})) - ubuf.fog.c, 0.0, 1.0);",
-                    UseReversedZ ? "(1.0 - in.pos.z)" : "in.pos.z");
+    const std::string_view fogDepth = UseReversedZ ? "(1.0 - in.pos.z)" : "in.pos.z";
+    if ((config.fogType & 0x08) != 0) {
+      fragmentFn += fmt::format("\n    // Orthographic fog\n    var fogBase = ubuf.fog.a * {};", fogDepth);
+    } else {
+      fragmentFn +=
+          fmt::format("\n    // Perspective fog\n    var fogBase = ubuf.fog.a / (ubuf.fog.b - {});", fogDepth);
+    }
+    if (config.fogRangeEnabled) {
+      fragmentFn += "\n    fogBase *= bitcast<f32>(abuf[ubuf.fog_range_base + u32(in.pos.x)]);";
+    }
+    fragmentFn += "\n    var fogF = clamp(fogBase - ubuf.fog.c, 0.0, 1.0);";
     switch (config.fogType) {
       DEFAULT_FATAL("invalid fog type {}", config.fogType);
     case GX_FOG_PERSP_LIN:
@@ -1941,7 +1949,8 @@ struct Uniform {{
     current_pnmtx: u32,
     render_viewport_size: vec2f,
     logical_viewport_size: vec2f,
-    pad: vec2u,
+    fog_range_base: u32,
+    pad: u32,
     array_start: array<u32, 12>,{0}
 }};
 @group(0) @binding(0)

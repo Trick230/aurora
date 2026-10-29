@@ -392,6 +392,18 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
 static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian);
 static void invalidate_array_uploads();
 
+// Fog A from FOG0's partial float: scaled by 2^b_s (FOG2) for perspective fog,
+// as is for orthographic.
+static void decode_fog_a() {
+  const u32 raw = g_gxState.fog.fog0Raw;
+  const u32 bits = bp_get(raw, 1, 19) << 31 | bp_get(raw, 8, 11) << 23 | bp_get(raw, 11, 0) << 12;
+  float encoded;
+  std::memcpy(&encoded, &bits, sizeof(encoded));
+  g_gxState.fog.a = (g_gxState.fog.type & 0x08) != 0
+                        ? encoded
+                        : std::ldexp(encoded, static_cast<int>(g_gxState.fog.fog2Raw & 0x1F));
+}
+
 void process(const u8* data, u32 size, bool bigEndian) {
   u32 pos = 0;
 
@@ -1053,19 +1065,31 @@ static void handle_bp(u32 value, bool bigEndian) {
     break;
   }
 
+  // Fog range adjustment: the center column (screen x + 342) and its enable
+  case 0xE8: {
+    g_gxState.fog.rangeCenter = static_cast<s16>(bp_get(value, 10, 0)) - 342;
+    g_gxState.fog.rangeEnabled = bp_get(value, 1, 10) != 0;
+    g_gxState.stateDirty = true;
+    break;
+  }
+  // Fog range K factors, two a register
+  case 0xE9:
+  case 0xEA:
+  case 0xEB:
+  case 0xEC:
+  case 0xED: {
+    const u32 idx = (regId - 0xE9) * 2;
+    g_gxState.fog.rangeK[idx] = static_cast<u16>(bp_get(value, 12, 0));
+    g_gxState.fog.rangeK[idx + 1] = static_cast<u16>(bp_get(value, 12, 12));
+    g_gxState.stateDirty = true;
+    break;
+  }
+
   // Fog A/B parameters (0xEE-0xF0)
   // FOG0 (0xEE): A parameter - sign(1)|exp(8)|mantissa(11) partial IEEE 754 float
   case 0xEE: {
     g_gxState.fog.fog0Raw = value;
-    // Reconstruct A = a_encoded * 2^b_s
-    u32 a_mant = bp_get(value, 11, 0);
-    u32 a_exp = bp_get(value, 8, 11);
-    u32 a_sign = bp_get(value, 1, 19);
-    u32 a_bits = (a_sign << 31) | (a_exp << 23) | (a_mant << 12);
-    float a_encoded;
-    std::memcpy(&a_encoded, &a_bits, sizeof(a_encoded));
-    u32 b_s = g_gxState.fog.fog2Raw & 0x1F;
-    g_gxState.fog.a = std::ldexp(a_encoded, static_cast<int>(b_s));
+    decode_fog_a();
     g_gxState.stateDirty = true;
     break;
   }
@@ -1083,14 +1107,7 @@ static void handle_bp(u32 value, bool bigEndian) {
   case 0xF0: {
     g_gxState.fog.fog2Raw = value;
     u32 b_s = bp_get(value, 5, 0);
-    // Recompute A with updated b_s
-    u32 a_mant = bp_get(g_gxState.fog.fog0Raw, 11, 0);
-    u32 a_exp = bp_get(g_gxState.fog.fog0Raw, 8, 11);
-    u32 a_sign = bp_get(g_gxState.fog.fog0Raw, 1, 19);
-    u32 a_bits = (a_sign << 31) | (a_exp << 23) | (a_mant << 12);
-    float a_encoded;
-    std::memcpy(&a_encoded, &a_bits, sizeof(a_encoded));
-    g_gxState.fog.a = std::ldexp(a_encoded, static_cast<int>(b_s));
+    decode_fog_a();
     // Recompute B with updated b_s
     u32 b_m = bp_get(g_gxState.fog.fog1Raw, 24, 0);
     float B_mant = static_cast<float>(b_m) / 8388638.0f;
@@ -1101,8 +1118,10 @@ static void handle_bp(u32 value, bool bigEndian) {
 
   // Fog type + C parameter from FOG3 (0xF1)
   case 0xF1: {
-    GXFogType fogType = static_cast<GXFogType>(bp_get(value, 3, 21));
-    g_gxState.fog.type = fogType;
+    // fsel, and the projection bit that makes it orthographic (GXFogType's 0x08)
+    g_gxState.fog.type = static_cast<GXFogType>(bp_get(value, 3, 21) | bp_get(value, 1, 20) << 3);
+    // A's exponent applies only to perspective fog.
+    decode_fog_a();
     // Decode C parameter (same partial float encoding as A)
     u32 c_mant = bp_get(value, 11, 0);
     u32 c_exp = bp_get(value, 8, 11);

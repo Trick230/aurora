@@ -174,13 +174,19 @@ struct FogState {
   float b = 0.5f;
   float c = 0.f;
   Vec4<float> color;
+  // Range adjustment (0xE8-0xED): fog grows away from the center column, by
+  // the 10 K factors (units of 1/64) across half the screen.
+  std::array<u16, 10> rangeK{};
+  s16 rangeCenter = 0;
+  bool rangeEnabled = false;
   // Raw encoded register values for A/B reconstruction across separate BP writes
   u32 fog0Raw = 0; // 0xEE: encoded A parameter
   u32 fog1Raw = 0; // 0xEF: B mantissa
   u32 fog2Raw = 0; // 0xF0: B shift
 
   bool operator==(const FogState& rhs) const {
-    return type == rhs.type && a == rhs.a && b == rhs.b && c == rhs.c && color == rhs.color;
+    return type == rhs.type && a == rhs.a && b == rhs.b && c == rhs.c && color == rhs.color &&
+           rangeK == rhs.rangeK && rangeCenter == rhs.rangeCenter && rangeEnabled == rhs.rangeEnabled;
   }
   bool operator!=(const FogState& rhs) const { return !(*this == rhs); }
 };
@@ -488,7 +494,8 @@ struct ShaderConfig {
   // MSAA, an unblended cutout and no alpha kept in the EFB: the alpha compare
   // becomes coverage, so the cutout's edges are antialiased like triangles'.
   u8 alphaToCoverage : 1 = 0;
-  u8 pad1 : 5 = 0;
+  u8 fogRangeEnabled : 1 = 0;
+  u8 pad1 : 4 = 0;
   u8 pad2 = 0;
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
@@ -524,6 +531,7 @@ struct ShaderInfo {
   std::bitset<MaxIndTexMtxs> usedIndTexMtxs;
   u32 uniformSize = 0;
   bool usesFog : 1 = false;
+  bool usesFogRange : 1 = false;
   bool lightingEnabled : 1 = false;
   u8 lineMode : 2 = 0;
 };
