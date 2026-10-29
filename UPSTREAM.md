@@ -29,3 +29,18 @@ here; upstream is merged by hand when it has something the fork wants.
   and the paths the GX stream never reaches; D3D12, Vulkan and Metal are the
   only backends, so pipelines always build on workers. ImGui idles until a
   menu is opened. Per-draw work is trimmed on the merge path.
+
+## Upstream ported since the fork point
+
+Checked against upstream `505b5eb` (2026-10-29):
+
+- min filter decode (`26371ce`), packed TEV alpha comparisons (`3094e04`)
+- range fog with its factors precomputed (`a59d20b` and earlier), plus the
+  orthographic fog type
+- EFB copies: alpha 1 from an EFB without alpha (`3840bf9`), clears of the
+  copy rect only and `GXSetDstAlpha` through the shader (`9c0bf66`)
+- no `tev_overflow` on registers a clamped stage wrote (`4998dcc`)
+- texture reuse by contents (`7af8def`), on the FIFO's retail texture cache
+
+Not taken: the RmlUi, input, WPAD, Android and THP work, the public gfx APIs,
+and the regs/recording refactors the FIFO host replaces.
