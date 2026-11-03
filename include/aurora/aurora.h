@@ -85,6 +85,11 @@ typedef struct {
   float renderScale;
   bool vsync;
   bool startFullscreen;
+  /**
+   * Never show the window; everything still renders and presents to it (a
+   * scripted run on someone's desktop).
+   */
+  bool windowHidden;
   bool pauseOnFocusLost;
   bool allowTextureDumps;
   bool allowCpuAdapter;

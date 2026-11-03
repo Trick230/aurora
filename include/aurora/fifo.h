@@ -53,6 +53,8 @@ typedef struct AuroraFifoConfig {
   bool dump_textures;
   // One line per second of render-thread counters on stderr.
   bool stats;
+  // Never shows the window; everything still renders.
+  bool hidden;
 } AuroraFifoConfig;
 
 // Starts the render thread and waits until Aurora is up and every pipeline

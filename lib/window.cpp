@@ -210,7 +210,7 @@ void destroy_window() {
 }
 
 void show_window() {
-  if (g_window != nullptr) {
+  if (g_window != nullptr && !g_config.windowHidden) {
     TRY_WARN(SDL_ShowWindow(g_window), "Failed to show window: {}", SDL_GetError());
   }
 }
@@ -279,7 +279,7 @@ bool is_paused() noexcept {
   }
   const auto flags = SDL_GetWindowFlags(g_window);
   if ((flags & SDL_WINDOW_HIDDEN) != 0u) {
-    return true;
+    return !g_config.windowHidden;
   }
   // Wait until the window has received focus before respecting pauseOnFocusLost
   if (!g_gotFocus) {

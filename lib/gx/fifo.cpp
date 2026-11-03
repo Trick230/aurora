@@ -273,6 +273,7 @@ void RenderThread(std::atomic<int>* started)
   config.cachePath = s_config.cache_path;
   config.desiredBackend = BACKEND_AUTO;
   config.vsync = s_config.vsync;
+  config.windowHidden = s_config.hidden;
   config.frameInterpolation = s_config.interpolate;
   config.presentRate = s_config.present_rate;
   config.displayAspect = s_config.aspect;
