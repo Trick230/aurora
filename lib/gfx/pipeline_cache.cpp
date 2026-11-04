@@ -1040,6 +1040,14 @@ PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, New
   return find_pipeline_impl(type, config, std::move(cb));
 }
 
+PipelineRef find_pipeline_blocking(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
+  return find_pipeline_impl(type, config, std::move(cb), PipelinePriority::Blocking);
+}
+
+PipelineRef find_pipeline_blocking(ShaderType type, const clear::PipelineConfig& config, NewPipelineCallback&& cb) {
+  return find_pipeline_impl(type, config, std::move(cb), PipelinePriority::Blocking);
+}
+
 void initialize_pipeline_cache() {
   g_pipelineCacheBroken = false;
   g_pipelineCacheWriterStop = false;

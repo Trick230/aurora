@@ -1929,7 +1929,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   // The per-frame staging buffers are fixed; drop a draw that cannot fit rather
   // than abort. Sizes are upper bounds: strips/fans expand to 3 indices per
   // vertex, and a merge may also convert the previous draw. A draw can also add
-  // a fog range table and its ubershader configuration to the storage.
+  // a fog range table and its ubershader configuration to the storage, and the
+  // uniforms keep room for the frame's render pass resolves, which don't check.
   size_t storageBytes = 0;
   for (u32 a = 0; a < s_indexedLayout.count; ++a) {
     const u32 attr = s_indexedLayout.attrs[a].attr;
@@ -1940,7 +1941,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
   }
   const size_t idxVerts = vtxCount + (canMerge ? lastDraw->vtxCount : 0u);
-  if (!gfx::frame_has_room(totalVtxBytes + 4, idxVerts * 3 * sizeof(u16) + 4, MaxUniformSize + 256, storageBytes + 64 * 1024))
+  if (!gfx::frame_has_room(totalVtxBytes + 4, idxVerts * 3 * sizeof(u16) + 4, MaxUniformSize + 256 + 64 * 1024, storageBytes + 64 * 1024))
     UNLIKELY {
       static bool warned = false;
       if (!warned) {

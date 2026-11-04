@@ -495,7 +495,7 @@ void push_draw_command(clear::DrawData data) {
 
 template <>
 PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
-  return find_pipeline(ShaderType::Clear, config, [=] { return create_pipeline(config); });
+  return find_pipeline_blocking(ShaderType::Clear, config, [=] { return create_pipeline(config); });
 }
 
 void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
@@ -619,7 +619,7 @@ PipelineRef pipeline_ref(const gx::PipelineConfig& config) {
 }
 
 PipelineRef uber_pipeline_ref(const gx::PipelineConfig& config) {
-  return find_pipeline(ShaderType::GXUber, config, [=] { return gx::create_uber_pipeline(config); });
+  return find_pipeline_blocking(ShaderType::GXUber, config, [=] { return gx::create_uber_pipeline(config); });
 }
 
 void initialize() {
@@ -1226,6 +1226,8 @@ static void encode_command(const wgpu::RenderPassEncoder& pass, const RenderPass
       break;
     case ShaderType::GX:
       gx::render(draw.gx, pass);
+      break;
+    case ShaderType::GXUber: // A pipeline's type; its draws are GX draws.
       break;
     }
   } break;

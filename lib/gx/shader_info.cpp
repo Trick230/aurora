@@ -259,8 +259,9 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     }
   }
 
-  // Emboss bump needs its source texcoord generated and a light enabled
-  for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
+  // Emboss bump needs its source texcoord generated and a light enabled. The
+  // source comes before the texcoord, so go backwards to reach it here too.
+  for (int i = static_cast<int>(info.sampledTexCoords.size()) - 1; i >= 0; --i) {
     if (!info.sampledTexCoords.test(i)) {
       continue;
     }
@@ -268,7 +269,17 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     if (tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) {
       info.sampledTexCoords.set(tcg.embossSrc);
       info.lightingEnabled = true;
-    } else if (tcg.src == GX_TG_COLOR0 || tcg.src == GX_TG_COLOR1) {
+    }
+  }
+  for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
+    if (!info.sampledTexCoords.test(i)) {
+      continue;
+    }
+    const auto& tcg = config.tcgs[i];
+    if (tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) {
+      continue;
+    }
+    if (tcg.src == GX_TG_COLOR0 || tcg.src == GX_TG_COLOR1) {
       // Color texgen (SRTG) reads the lit channel, so compute it even when no
       // TEV stage rasterizes it (toon ramps).
       info.sampledColorChannels.set(tcg.src - GX_TG_COLOR0);
