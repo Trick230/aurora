@@ -8,7 +8,7 @@
 namespace aurora::gx {
 static Module Log("aurora::gx");
 
-wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+DstAlphaMode dst_alpha_mode(const PipelineConfig& config) noexcept {
   // A destination alpha other than 0 (which the blend gives with any shader
   // alpha) needs the shader's alpha to be 1; a color blend that reads source
   // alpha then reads the TEV's from a second output.
@@ -29,6 +29,11 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
       }
     }
   }
+  return dstAlphaMode;
+}
+
+wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+  const auto dstAlphaMode = dst_alpha_mode(config);
   const auto shader = build_shader(config.shaderConfig, dstAlphaMode);
   const auto label = fmt::format("GX Pipeline {:x} shader {:x}",
                                  xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)),

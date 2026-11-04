@@ -181,6 +181,10 @@ private:
 };
 } // namespace aurora
 
+namespace aurora::gx {
+struct PipelineConfig;
+} // namespace aurora::gx
+
 namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = true;
 // GX draws share identical uniform blocks within a frame, so 8mb holds
@@ -238,6 +242,7 @@ using EndFrameCallback = std::function<void(wgpu::CommandEncoder&)>;
 enum class ShaderType : uint8_t {
   Clear = 0,
   GX = 1,
+  GXUber = 2,
 };
 
 void initialize();
@@ -286,6 +291,9 @@ DrawData* get_last_draw_command();
 
 template <typename PipelineConfig>
 PipelineRef pipeline_ref(const PipelineConfig& config);
+PipelineRef uber_pipeline_ref(const gx::PipelineConfig& config);
+// Whether a draw with this pipeline will draw.
+bool pipeline_ready(PipelineRef ref);
 bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
 bool bind_pipeline(PipelineRef ref, const wgpu::RenderBundleEncoder& bundle);
 

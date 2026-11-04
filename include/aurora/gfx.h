@@ -34,6 +34,9 @@ typedef struct {
   // Running total of draws encoded while their pipeline was still compiling
   // (skipped: the pop-in).
   uint32_t skippedDraws;
+  // Running total of draws recorded with the ubershader, their own pipeline
+  // still compiling.
+  uint32_t uberDraws;
 } AuroraStats;
 
 const AuroraStats* aurora_get_stats();

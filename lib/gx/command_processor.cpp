@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <bitset>
 #include <cmath>
 #include <cstdint>
@@ -1781,6 +1782,7 @@ static struct {
   GXVtxFmt fmt{};
   BindGroupRanges ranges{};
   gfx::PipelineRef pipeline{};
+  gfx::PipelineRef drawn{};
   GXBindGroups bindGroups{};
   gfx::Range uniformRange{};
   gfx::interp::BlockLayout layout;
@@ -1926,7 +1928,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
 
   // The per-frame staging buffers are fixed; drop a draw that cannot fit rather
   // than abort. Sizes are upper bounds: strips/fans expand to 3 indices per
-  // vertex, and a merge may also convert the previous draw.
+  // vertex, and a merge may also convert the previous draw. A draw can also add
+  // a fog range table and its ubershader configuration to the storage.
   size_t storageBytes = 0;
   for (u32 a = 0; a < s_indexedLayout.count; ++a) {
     const u32 attr = s_indexedLayout.attrs[a].attr;
@@ -1937,7 +1940,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
   }
   const size_t idxVerts = vtxCount + (canMerge ? lastDraw->vtxCount : 0u);
-  if (!gfx::frame_has_room(totalVtxBytes + 4, idxVerts * 3 * sizeof(u16) + 4, MaxUniformSize + 256, storageBytes))
+  if (!gfx::frame_has_room(totalVtxBytes + 4, idxVerts * 3 * sizeof(u16) + 4, MaxUniformSize + 256, storageBytes + 64 * 1024))
     UNLIKELY {
       static bool warned = false;
       if (!warned) {
@@ -2056,6 +2059,20 @@ static gfx::Range upload_array(const void* data, u32 size, u32 available) {
   return range;
 }
 
+// AURORA_FORCE_UBERSHADER checks the ubershader against the generated shaders:
+// 1 draws everything with it, 2 every other pipeline, for passes of a surface
+// that mix the two.
+static bool use_ubershader(gfx::PipelineRef pipeline) {
+  static const int forced = [] {
+    const char* value = std::getenv("AURORA_FORCE_UBERSHADER");
+    return value != nullptr ? std::atoi(value) : 0;
+  }();
+  if (forced == 1 || (forced == 2 && (pipeline & 1) != 0)) {
+    return true;
+  }
+  return !gfx::pipeline_ready(pipeline);
+}
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices, const std::array<u32, GX_VA_MAX_ATTR>& arraySizes) {
   // Build pipeline, bind groups, and push draw command
@@ -2087,13 +2104,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // between. Triangle draws then share the previous draw's pipeline, bindings
   // and uniform block (it holds no per-draw data), so only geometry differs.
   auto& s_last = s_lastDraw;
+  // The pipeline frame interpolation knows the draw by, and the one it draws
+  // with: the ubershader's while the draw's own is compiling.
   gfx::PipelineRef pipeline;
+  gfx::PipelineRef drawn;
   GXBindGroups bindGroups;
   gfx::Range uniformRange;
   gfx::interp::BlockLayout layout;
   if (!expanded && !g_gxState.stateDirty && s_last.frame == gfx::current_frame() && s_last.fmt == fmt &&
       std::memcmp(&s_last.ranges, &ranges, sizeof(ranges)) == 0) {
     pipeline = s_last.pipeline;
+    drawn = s_last.drawn;
     bindGroups = s_last.bindGroups;
     uniformRange = s_last.uniformRange;
     layout = s_last.layout;
@@ -2104,11 +2125,19 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     resolve_sampled_textures(info);
     bindGroups = build_bind_groups(info);
     pipeline = gfx::pipeline_ref(config);
-    uniformRange = build_uniform(info, vertRange.offset, ranges, &layout);
+    if (use_ubershader(pipeline)) {
+      drawn = gfx::uber_pipeline_ref(uber_pipeline_config(config));
+      const u32 configBase = push_uber_config(config.shaderConfig, info);
+      uniformRange = build_uber_uniform(info, vertRange.offset, ranges, configBase, &layout);
+    } else {
+      drawn = pipeline;
+      uniformRange = build_uniform(info, vertRange.offset, ranges, &layout);
+    }
     s_last.frame = expanded ? UINT32_MAX : gfx::current_frame();
     s_last.fmt = fmt;
     s_last.ranges = ranges;
     s_last.pipeline = pipeline;
+    s_last.drawn = drawn;
     s_last.bindGroups = bindGroups;
     s_last.uniformRange = uniformRange;
     s_last.layout = layout;
@@ -2142,8 +2171,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         .used = s_vtxMatrices != 0 ? s_vtxMatrices : static_cast<u16>(1u << std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1)),
     });
   }
+  if (drawn != pipeline) {
+    ++gfx::g_stats.uberDraws;
+  }
   gfx::push_draw_command(DrawData{
-      .pipeline = pipeline,
+      .pipeline = drawn,
       .vertRange = vertRange,
       .idxRange = idxRange,
       .uniformRange = uniformRange,

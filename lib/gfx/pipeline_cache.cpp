@@ -424,7 +424,8 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   g_lastPipelineRef = hash;
   const uint32_t firstFrameUsed = firstFrameUsedOverride.value_or(current_frame());
   bool notifyWorker = false;
-  bool persist = priority != PipelinePriority::Background;
+  // The ubershader's pipelines follow from the GX ones the cache holds.
+  bool persist = priority != PipelinePriority::Background && type != ShaderType::GXUber;
   bool pipelineReady = false;
   std::optional<PipelineCacheWrite> cacheWrite;
   {
@@ -969,6 +970,12 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
     }
 
     find_pipeline_impl(type, config, [=] { return create(config); }, PipelinePriority::Background, firstFrameUsed);
+    if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
+      // Whatever this state's next shader is, the ubershader can draw it.
+      const auto uber = gx::uber_pipeline_config(config);
+      find_pipeline_impl(ShaderType::GXUber, uber, [=] { return gx::create_uber_pipeline(uber); },
+                         PipelinePriority::Background, firstFrameUsed);
+    }
     ++acceptedRows;
   }
 
@@ -1077,6 +1084,11 @@ void shutdown_pipeline_cache() {
 
   queuedPipelines = 0;
   createdPipelines = 0;
+}
+
+bool pipeline_ready(PipelineRef ref) {
+  std::lock_guard guard{g_pipelineMutex};
+  return g_pipelines.contains(ref);
 }
 
 bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {

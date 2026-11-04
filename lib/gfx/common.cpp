@@ -618,6 +618,10 @@ PipelineRef pipeline_ref(const gx::PipelineConfig& config) {
   return find_pipeline(ShaderType::GX, config, [=] { return create_pipeline(config); });
 }
 
+PipelineRef uber_pipeline_ref(const gx::PipelineConfig& config) {
+  return find_pipeline(ShaderType::GXUber, config, [=] { return gx::create_uber_pipeline(config); });
+}
+
 void initialize() {
   g_frameIndex = 0;
   g_processEventsQueued.store(false, std::memory_order_release);

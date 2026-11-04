@@ -79,7 +79,7 @@ static std::string alpha_bump_sel(size_t stageIdx, const ShaderConfig& config, c
   }
 }
 
-static bool uses_texture_sample(const TevStage& stage) noexcept {
+bool uses_texture_sample(const TevStage& stage) noexcept {
   const auto& c = stage.colorPass;
   const auto& a = stage.alphaPass;
   return c.a == GX_CC_TEXC || c.a == GX_CC_TEXA || c.b == GX_CC_TEXC || c.b == GX_CC_TEXA || c.c == GX_CC_TEXC ||
@@ -330,7 +330,7 @@ static std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const Shade
 // From upstream 4998dcc: a register a clamped stage last wrote holds 0..1, which
 // tev_overflow leaves as is; every other source (texture, rasterized color,
 // constants) is 0..1 too. Only the registers can read unclamped results.
-static bool tev_color_arg_is_normalized(GXTevColorArg arg, const std::array<bool, MaxTevRegs>& colorNormalized,
+bool tev_color_arg_is_normalized(GXTevColorArg arg, const std::array<bool, MaxTevRegs>& colorNormalized,
                                         const std::array<bool, MaxTevRegs>& alphaNormalized) {
   switch (arg) {
   case GX_CC_CPREV:
@@ -354,7 +354,7 @@ static bool tev_color_arg_is_normalized(GXTevColorArg arg, const std::array<bool
   }
 }
 
-static bool tev_alpha_arg_is_normalized(GXTevAlphaArg arg, const std::array<bool, MaxTevRegs>& alphaNormalized) {
+bool tev_alpha_arg_is_normalized(GXTevAlphaArg arg, const std::array<bool, MaxTevRegs>& alphaNormalized) {
   switch (arg) {
   case GX_CA_APREV:
     return alphaNormalized[GX_TEVPREV];
@@ -419,7 +419,7 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
 
 // The packed comparisons (R8, GR16, BGR24) compare color operands: a and b are
 // vec3f.
-static bool tev_alpha_compares_color(GXTevOp op) { return op >= GX_TEV_COMP_R8_GT && op <= GX_TEV_COMP_BGR24_EQ; }
+bool tev_alpha_compares_color(GXTevOp op) { return op >= GX_TEV_COMP_R8_GT && op <= GX_TEV_COMP_BGR24_EQ; }
 
 // a, b and c come overflowed (or known not to need it).
 static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
@@ -1695,6 +1695,56 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
   }
 
   auto shaderSource = fmt::format(R"""(
+{11}
+{8}
+
+struct Uniform {{
+    vtx_start: u32,
+    current_pnmtx: u32,
+    render_viewport_size: vec2f,
+    logical_viewport_size: vec2f,
+    fog_range_base: u32,
+    pad: u32,
+    array_start: array<u32, 12>,{0}
+}};
+@group(0) @binding(0)
+var<storage, read> vbuf: array<u32>;
+@group(0) @binding(1)
+var<storage, read> abuf: array<u32>;
+@group(1) @binding(0)
+var<uniform> ubuf: Uniform;{1}
+
+struct VertexOutput {{
+    @builtin(position) pos: vec4f,{2}
+}};
+
+@vertex
+fn vs_main(
+    @builtin(vertex_index) vidx: u32{3}
+) -> VertexOutput {{
+    var out: VertexOutput;{7}{4}
+    return out;
+}}
+
+@fragment
+fn fs_main(in: VertexOutput) -> {9} {{{6}{5}
+    return {10};
+}}
+)""",
+                                        uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
+                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragmentOutput, fragmentReturn, shader_helpers());
+  if (dstAlphaMode == DstAlphaMode::DualSource) {
+    shaderSource.insert(0, "enable dual_source_blending;\n");
+  }
+  if (EnableDebugPrints) {
+    Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
+  }
+
+  return shaderSource;
+}
+
+std::string shader_helpers() noexcept {
+  return fmt::format(R"""(
 fn bswap32(v: u32, le: bool) -> u32 {{
   if (le) {{
     return v;
@@ -2021,51 +2071,7 @@ fn tev_overflow_vec4f(in: vec4f) -> vec4f {{
   return (byte_space - floor(byte_space / 256.0) * 256.0) / 255.0;
 }}
 
-{8}
-
-struct Uniform {{
-    vtx_start: u32,
-    current_pnmtx: u32,
-    render_viewport_size: vec2f,
-    logical_viewport_size: vec2f,
-    fog_range_base: u32,
-    pad: u32,
-    array_start: array<u32, 12>,{0}
-}};
-@group(0) @binding(0)
-var<storage, read> vbuf: array<u32>;
-@group(0) @binding(1)
-var<storage, read> abuf: array<u32>;
-@group(1) @binding(0)
-var<uniform> ubuf: Uniform;{1}
-
-struct VertexOutput {{
-    @builtin(position) pos: vec4f,{2}
-}};
-
-@vertex
-fn vs_main(
-    @builtin(vertex_index) vidx: u32{3}
-) -> VertexOutput {{
-    var out: VertexOutput;{7}{4}
-    return out;
-}}
-
-@fragment
-fn fs_main(in: VertexOutput) -> {9} {{{6}{5}
-    return {10};
-}}
-)""",
-                                        uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
-                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragmentOutput, fragmentReturn);
-  if (dstAlphaMode == DstAlphaMode::DualSource) {
-    shaderSource.insert(0, "enable dual_source_blending;\n");
-  }
-  if (EnableDebugPrints) {
-    Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
-  }
-
-  return shaderSource;
+)""");
 }
 
 wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode dstAlphaMode) noexcept {

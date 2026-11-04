@@ -337,7 +337,7 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
   return info;
 }
 
-static f32 tex_offset(GXTexOffset offs) noexcept {
+f32 tex_offset_value(GXTexOffset offs) noexcept {
   switch (offs) {
     DEFAULT_FATAL("invalid tex offset {}", underlying(offs));
   case GX_TO_ZERO:
@@ -355,7 +355,7 @@ static f32 tex_offset(GXTexOffset offs) noexcept {
   }
 }
 
-static u32 point_texcoord_mask() noexcept {
+u32 point_texcoord_mask() noexcept {
   u32 mask = 0;
   for (int i = 0; i < MaxTexCoord; ++i) {
     if (g_gxState.texCoordScales[i].pointOffset) {
@@ -365,7 +365,7 @@ static u32 point_texcoord_mask() noexcept {
   return mask;
 }
 
-static u32 line_texcoord_mask() noexcept {
+u32 line_texcoord_mask() noexcept {
   u32 mask = 0;
   for (int i = 0; i < MaxTexCoord; ++i) {
     if (g_gxState.texCoordScales[i].lineOffset) {
@@ -435,6 +435,28 @@ u32 fog_range_base() noexcept {
   s_fogRangeTables.push_back({key, static_cast<u32>(range.offset / sizeof(u32))});
   return s_fogRangeTables.back().base;
 }
+
+// A level frame issues thousands of draws whose blocks mostly repeat; share
+// them within the frame instead of filling the fixed uniform budget.
+gfx::Range push_block(const ByteBuffer& buf, u32 matrices, u32 lights, u32 post,
+                      gfx::interp::BlockLayout* layout) noexcept {
+  static absl::flat_hash_map<HashType, gfx::Range> pushed;
+  static u32 pushedFrame = UINT32_MAX;
+  if (pushedFrame != gfx::current_frame()) {
+    pushedFrame = gfx::current_frame();
+    pushed.clear();
+  }
+  const auto [it, inserted] = pushed.try_emplace(xxh3_hash_s(buf.data(), buf.size()));
+  if (inserted) {
+    it->second = gfx::push_uniform(buf.data(), buf.size());
+  }
+  *layout = {
+      .matrices = it->second.offset + matrices,
+      .lights = static_cast<uint16_t>(lights),
+      .post = static_cast<uint16_t>(post),
+  };
+  return it->second;
+}
 } // namespace
 
 gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
@@ -461,12 +483,12 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
     if (info.lineMode == 3) { // GX_POINTS
       buf.append<f32>(static_cast<f32>(g_gxState.pointSize) / 6.f);
       buf.append<f32>(1.0f);
-      buf.append<f32>(tex_offset(g_gxState.pointTexOffset));
+      buf.append<f32>(tex_offset_value(g_gxState.pointTexOffset));
       buf.append<u32>(point_texcoord_mask());
     } else { // GX_LINES / GX_LINESTRIP
       buf.append<f32>(static_cast<f32>(g_gxState.lineWidth) / 6.f);
       buf.append<f32>(g_gxState.lineHalfAspect ? 0.5f : 1.f);
-      buf.append<f32>(tex_offset(g_gxState.lineTexOffset));
+      buf.append<f32>(tex_offset_value(g_gxState.lineTexOffset));
       buf.append<u32>(line_texcoord_mask());
     }
   }
@@ -559,24 +581,71 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
     buf.append(texture_size_bias(tex));
   }
   g_gxState.stateDirty = false;
+  return push_block(buf, matrices, lights, post, layout);
+}
 
-  // A level frame issues thousands of draws whose blocks mostly repeat; share
-  // them within the frame instead of filling the fixed uniform budget.
-  static absl::flat_hash_map<HashType, gfx::Range> pushed;
-  static u32 pushedFrame = UINT32_MAX;
-  if (pushedFrame != gfx::current_frame()) {
-    pushedFrame = gfx::current_frame();
-    pushed.clear();
+gfx::Range build_uber_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges, u32 configBase,
+                              gfx::interp::BlockLayout* layout) noexcept {
+  static ByteBuffer buf;
+  buf.clear();
+  buf.reserve_extra(MaxUniformSize);
+
+  buf.append(info.lineMode != 0 ? vtxStart : 0u);
+  buf.append(g_gxState.currentPnMtx);
+  buf.append<f32>(g_gxState.renderViewport.width);
+  buf.append<f32>(g_gxState.renderViewport.height);
+  buf.append<f32>(g_gxState.logicalViewport.width);
+  buf.append<f32>(g_gxState.logicalViewport.height);
+  buf.append<u32>(info.usesFogRange ? fog_range_base() : 0u);
+  buf.append<u32>(configBase);
+  for (const auto& vaRange : ranges.vaRanges) {
+    buf.append<u32>(vaRange.offset);
   }
-  const auto [it, inserted] = pushed.try_emplace(xxh3_hash_s(buf.data(), buf.size()));
-  if (inserted) {
-    it->second = gfx::push_uniform(buf.data(), buf.size());
+  const auto matrices = static_cast<u32>(buf.size());
+  buf.append(g_gxState.proj);
+  for (int i = 0; i < MaxPnMtx; i++) {
+    buf.append(g_gxState.pnMtx[i].pos);
   }
-  *layout = {
-      .matrices = it->second.offset + matrices,
-      .lights = static_cast<uint16_t>(lights),
-      .post = static_cast<uint16_t>(post),
-  };
-  return it->second;
+  for (int i = 0; i < MaxTexMtx; i++) {
+    buf.append(g_gxState.texMtxs[i]);
+  }
+  for (int i = 0; i < MaxPnMtx; i++) {
+    buf.append(g_gxState.pnMtx[i].nrm);
+  }
+  for (const auto& reg : g_gxState.colorRegs) {
+    buf.append(reg);
+  }
+  const u32 lights = (static_cast<u32>(buf.size()) - matrices) / 4;
+  buf.append(g_gxState.lights);
+  for (const auto& state : g_gxState.colorChannelState) {
+    buf.append<u32>(state.lightMask.to_ulong());
+  }
+  for (const auto& state : g_gxState.colorChannelState) {
+    buf.append(state.ambColor);
+  }
+  for (const auto& state : g_gxState.colorChannelState) {
+    buf.append(state.matColor);
+  }
+  for (const auto& color : g_gxState.kcolors) {
+    buf.append(color);
+  }
+  const u32 post = (static_cast<u32>(buf.size()) - matrices) / 4;
+  buf.append(g_gxState.ptTexMtxs);
+  const auto& state = g_gxState.fog;
+  buf.append(Fog{.color = state.color, .a = state.a, .b = state.b, .c = state.c});
+  for (const auto& scale : g_gxState.texCoordScales) {
+    buf.append(Vec4{static_cast<f32>(scale.scaleS) + 1.0f, static_cast<f32>(scale.scaleT) + 1.0f, 0.0f, 0.0f});
+  }
+  for (const auto& mtx : g_gxState.indTexMtxs) {
+    buf.append(Vec4{mtx.mtx.m0.x, mtx.mtx.m0.y, mtx.mtx.m1.x, mtx.mtx.m1.y});
+    buf.append(Vec4{mtx.mtx.m2.x, mtx.mtx.m2.y, std::exp2f(mtx.scaleExp), 0.0f});
+  }
+  for (int i = 0; i < MaxTextures; ++i) {
+    buf.append(info.sampledTextures.test(i) ? texture_size_bias(get_texture(static_cast<GXTexMapID>(i)))
+                                            : Vec4<float>{0.f, 0.f, 0.f, 0.f});
+  }
+  CHECK(buf.size() == MaxUniformSize, "ubershader block is {} bytes", buf.size());
+  g_gxState.stateDirty = false;
+  return push_block(buf, matrices, lights, post, layout);
 }
 } // namespace aurora::gx

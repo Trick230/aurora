@@ -34,6 +34,14 @@ struct PipelineConfig {
 static_assert(std::has_unique_object_representations_v<PipelineConfig>);
 
 wgpu::RenderPipeline create_pipeline([[maybe_unused]] const PipelineConfig& config);
+DstAlphaMode dst_alpha_mode(const PipelineConfig& config) noexcept;
+
+// The ubershader's pipeline for a draw's: the fixed-function state alone.
+PipelineConfig uber_pipeline_config(const PipelineConfig& config) noexcept;
+wgpu::RenderPipeline create_uber_pipeline(const PipelineConfig& config);
+// The draw's configuration in the frame's storage, for its uniform block: its
+// offset in words.
+u32 push_uber_config(const ShaderConfig& config, const ShaderInfo& info) noexcept;
 void render(const DrawData& data, const wgpu::RenderPassEncoder& pass);
 // The same into a render bundle, which cannot set the blend constant: the
 // caller sets data.dstAlpha's on the pass.
