@@ -32,7 +32,7 @@ here; upstream is merged by hand when it has something the fork wants.
 
 ## Upstream ported since the fork point
 
-Checked against upstream `505b5eb` (2026-10-29):
+Checked against upstream `377ed36` (2026-11-04):
 
 - min filter decode (`26371ce`), packed TEV alpha comparisons (`3094e04`)
 - range fog with its factors precomputed (`a59d20b` and earlier), plus the
@@ -43,6 +43,7 @@ Checked against upstream `505b5eb` (2026-10-29):
 - texture reuse by contents (`7af8def`), on the FIFO's retail texture cache
 - copy textures in an LRU (`b922153`): the current copy at each destination
   stays, replaced ones go within 64 MB or once idle; no clear on resize
+- light directions normalized in the uniforms (`0b39c95`)
 
 Not taken: the RmlUi, input, WPAD, Android and THP work, the public gfx APIs,
 and the regs/recording refactors the FIFO host replaces.

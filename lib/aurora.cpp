@@ -12,6 +12,11 @@
 #include <SDL3/SDL_filesystem.h>
 #include <magic_enum.hpp>
 
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
 
 namespace aurora {
 AuroraConfig g_config;
@@ -31,6 +36,77 @@ uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
     return 0;
   }
   return static_cast<uint32_t>(std::clamp(value, 0.0, static_cast<double>(maximum)));
+}
+
+// AURORA_FRAME_DUMP=<dir>: each frame's hash goes to hashes.txt there, and every
+// 30th frame's RGBA pixels to <frame>.raw, to compare renderers by numbers.
+const char* frame_dump_dir() noexcept {
+  static const char* dir = std::getenv("AURORA_FRAME_DUMP");
+  return dir;
+}
+
+struct FrameDump {
+  wgpu::Buffer buffer;
+  uint32_t width = 0, height = 0, row = 0;
+  bool bgra = false;
+};
+
+FrameDump frame_dump_copy(const wgpu::CommandEncoder& encoder) {
+  const auto& source = webgpu::present_source();
+  FrameDump dump{.width = source.size.width, .height = source.size.height};
+  dump.row = AURORA_ALIGN(dump.width * 4, 256);
+  dump.bgra =
+      source.format == wgpu::TextureFormat::BGRA8Unorm || source.format == wgpu::TextureFormat::BGRA8UnormSrgb;
+  const wgpu::BufferDescriptor descriptor{
+      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
+      .size = uint64_t{dump.row} * dump.height,
+  };
+  dump.buffer = g_device.CreateBuffer(&descriptor);
+  const wgpu::TexelCopyTextureInfo src{.texture = source.texture};
+  const wgpu::TexelCopyBufferInfo dst{.layout = {.bytesPerRow = dump.row, .rowsPerImage = dump.height},
+                                      .buffer = dump.buffer};
+  const wgpu::Extent3D extent{dump.width, dump.height, 1};
+  encoder.CopyTextureToBuffer(&src, &dst, &extent);
+  return dump;
+}
+
+void frame_dump_write(const FrameDump& dump) {
+  static uint64_t frame = 0;
+  const uint64_t size = uint64_t{dump.row} * dump.height;
+  bool done = false;
+  const auto future = dump.buffer.MapAsync(wgpu::MapMode::Read, 0, size, wgpu::CallbackMode::WaitAnyOnly,
+                                           [&](wgpu::MapAsyncStatus, wgpu::StringView) { done = true; });
+  webgpu::g_instance.WaitAny(future, UINT64_MAX);
+  if (!done) {
+    return;
+  }
+  const auto* mapped = static_cast<const uint8_t*>(dump.buffer.GetConstMappedRange());
+  std::vector<uint8_t> pixels(size_t{dump.width} * 4 * dump.height);
+  for (uint32_t y = 0; y < dump.height; ++y) {
+    const uint8_t* from = mapped + size_t{y} * dump.row;
+    uint8_t* to = pixels.data() + size_t{y} * dump.width * 4;
+    for (uint32_t x = 0; x < dump.width; ++x, from += 4, to += 4) {
+      to[0] = from[dump.bgra ? 2 : 0];
+      to[1] = from[1];
+      to[2] = from[dump.bgra ? 0 : 2];
+      to[3] = 255; // never shown, and a few pixels of it vary between runs
+    }
+  }
+  const std::string dir = frame_dump_dir();
+  if (FILE* hashes = std::fopen((dir + "/hashes.txt").c_str(), frame == 0 ? "w" : "a")) {
+    std::fprintf(hashes, "%llu %016llx\n", static_cast<unsigned long long>(frame),
+                 static_cast<unsigned long long>(XXH3_64bits(pixels.data(), pixels.size())));
+    std::fclose(hashes);
+  }
+  if (frame % 30 == 0) {
+    const std::string path = fmt::format("{}/{:06}.raw", dir, frame);
+    if (FILE* raw = std::fopen(path.c_str(), "wb")) {
+      std::fwrite(pixels.data(), 1, pixels.size(), raw);
+      std::fclose(raw);
+    }
+  }
+  dump.buffer.Unmap();
+  ++frame;
 }
 
 void set_present_viewport(const wgpu::RenderPassEncoder& pass, const gfx::Viewport& viewport, uint32_t surfaceWidth,
@@ -187,6 +263,7 @@ void end_frame() noexcept {
                                                            presentSource.size.width, presentSource.size.height);
 
   gfx::end_frame([viewport, imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
+    const FrameDump frameDump = frame_dump_dir() ? frame_dump_copy(encoder) : FrameDump{};
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
@@ -255,6 +332,9 @@ void end_frame() noexcept {
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
     {
       g_queue.Submit(1, &buffer);
+    }
+    if (frameDump.buffer) {
+      frame_dump_write(frameDump);
     }
     if (canPresent && g_surface) {
       wgpu::ConvertibleStatus status = wgpu::Status::Error;

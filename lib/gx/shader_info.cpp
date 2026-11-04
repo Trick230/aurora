@@ -14,6 +14,19 @@ Module Log("aurora::gx");
 
 bool is_alpha_bump_channel(GXChannelID id) { return id == GX_ALPHA_BUMP || id == GX_ALPHA_BUMPN; }
 
+Light normalize_light_dir(Light light) {
+  const double x = light.dir[0];
+  const double y = light.dir[1];
+  const double z = light.dir[2];
+  const double len = std::sqrt(x * x + y * y + z * z);
+  if (!std::isfinite(len)) {
+    light.dir = {0.f, 0.f, 0.f};
+  } else if (len > 0.0) {
+    light.dir = {static_cast<float>(x / len), static_cast<float>(y / len), static_cast<float>(z / len)};
+  }
+  return light;
+}
+
 Vec4<float> texture_size_bias(const gfx::TextureBind& tex) {
   auto width = static_cast<float>(tex.texObj.width());
   auto height = static_cast<float>(tex.texObj.height());
@@ -528,7 +541,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
     lights = (static_cast<u32>(buf.size()) - matrices) / 4;
     // Lights
     static_assert(sizeof(g_gxState.lights) == 80 * GX::MaxLights);
-    buf.append(g_gxState.lights);
+    for (const auto& light : g_gxState.lights) {
+      buf.append(normalize_light_dir(light));
+    }
     // Light state for all channels
     for (int i = 0; i < 4; ++i) {
       buf.append<u32>(g_gxState.colorChannelState[i].lightMask.to_ulong());
@@ -627,7 +642,9 @@ gfx::Range build_uber_uniform(const ShaderInfo& info, u32 vtxStart, const BindGr
     buf.append(reg);
   }
   const u32 lights = (static_cast<u32>(buf.size()) - matrices) / 4;
-  buf.append(g_gxState.lights);
+  for (const auto& light : g_gxState.lights) {
+    buf.append(normalize_light_dir(light));
+  }
   for (const auto& state : g_gxState.colorChannelState) {
     buf.append<u32>(state.lightMask.to_ulong());
   }
