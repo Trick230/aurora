@@ -4,6 +4,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <climits>
 #include <cstdio>
 #include <string>
 
@@ -44,6 +45,12 @@ public:
   uint32_t width = 0, height = 0;
 };
 
+class D3D12RenderPipeline final : public RenderPipeline {
+public:
+  ComPtr<ID3D12RootSignature> root;
+  ComPtr<ID3D12PipelineState> state;
+};
+
 class D3D12CommandList final : public CommandList {
 public:
   ComPtr<ID3D12CommandAllocator> allocator;
@@ -74,8 +81,21 @@ public:
     list->OMSetRenderTargets(1, &texture.rtv, FALSE, nullptr);
     const FLOAT color[4] = {clear.r, clear.g, clear.b, clear.a};
     list->ClearRenderTargetView(texture.rtv, color, 0, nullptr);
+    const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<FLOAT>(texture.width), static_cast<FLOAT>(texture.height),
+                                  0.0f, 1.0f};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(texture.width), static_cast<LONG>(texture.height)};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
   }
   void end_render_pass() override {}
+
+  void set_pipeline(RenderPipeline& pipeline) override {
+    auto& native = static_cast<D3D12RenderPipeline&>(pipeline);
+    list->SetGraphicsRootSignature(native.root.Get());
+    list->SetPipelineState(native.state.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  }
+  void draw(uint32_t vertices) override { list->DrawInstanced(vertices, 1, 0, 0); }
 
   void copy_texture_to_buffer(Texture& source, Buffer& destination, uint32_t bytes_per_row) override {
     auto& texture = static_cast<D3D12Texture&>(source);
@@ -177,6 +197,32 @@ public:
       return nullptr;
     list->list->Close();
     return list;
+  }
+
+  std::unique_ptr<RenderPipeline> create_render_pipeline(const RenderPipelineDesc& desc) override {
+    auto pipeline = std::make_unique<D3D12RenderPipeline>();
+    D3D12_ROOT_SIGNATURE_DESC root{};
+    ComPtr<ID3DBlob> blob;
+    if (FAILED(D3D12SerializeRootSignature(&root, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr)) ||
+        FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                           IID_PPV_ARGS(&pipeline->root))))
+      return nullptr;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC info{};
+    info.pRootSignature = pipeline->root.Get();
+    info.VS = {desc.vertex->data(), desc.vertex->size()};
+    info.PS = {desc.fragment->data(), desc.fragment->size()};
+    info.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    info.SampleMask = UINT_MAX;
+    info.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    info.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    info.RasterizerState.DepthClipEnable = TRUE;
+    info.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    info.NumRenderTargets = 1;
+    info.RTVFormats[0] = to_dxgi(desc.color_format);
+    info.SampleDesc.Count = 1;
+    if (FAILED(device->CreateGraphicsPipelineState(&info, IID_PPV_ARGS(&pipeline->state))))
+      return nullptr;
+    return pipeline;
   }
 
   void submit(CommandList& list) override {

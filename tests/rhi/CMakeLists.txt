@@ -10,5 +10,7 @@ target_link_libraries(test_rhi PRIVATE aurora_rhi)
 if (MINGW)
     target_link_options(test_rhi PRIVATE -static)
 endif ()
+add_custom_command(TARGET test_rhi POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${AURORA_RHI_RUNTIME_FILES} $<TARGET_FILE_DIR:test_rhi>)
 enable_testing()
 add_test(NAME rhi COMMAND test_rhi)

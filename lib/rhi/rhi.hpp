@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace aurora::rhi {
 
@@ -31,6 +32,29 @@ struct TextureDesc {
   uint32_t width = 1;
   uint32_t height = 1;
   Format format = Format::RGBA8Unorm;
+};
+
+enum class ShaderStage { Vertex, Fragment };
+
+// What the backend's API takes: DXIL or SPIR-V.
+using ShaderCode = std::vector<uint8_t>;
+
+// The same HLSL for every backend. On Vulkan a resource's set is its register's
+// space, and its binding the register plus 1000 for t, 2000 for s and 3000 for u.
+bool compile_shader(Backend backend, ShaderStage stage, const std::string& source, const std::string& entry,
+                    ShaderCode* code, std::string* error);
+
+struct RenderPipelineDesc {
+  const ShaderCode* vertex = nullptr;
+  const char* vertex_entry = "main";
+  const ShaderCode* fragment = nullptr;
+  const char* fragment_entry = "main";
+  Format color_format = Format::RGBA8Unorm;
+};
+
+class RenderPipeline {
+public:
+  virtual ~RenderPipeline() = default;
 };
 
 class Buffer {
@@ -60,6 +84,8 @@ public:
   virtual void end() = 0;
   virtual void begin_render_pass(Texture& target, const ClearColor& clear) = 0;
   virtual void end_render_pass() = 0;
+  virtual void set_pipeline(RenderPipeline& pipeline) = 0;
+  virtual void draw(uint32_t vertices) = 0;
   virtual void copy_texture_to_buffer(Texture& source, Buffer& destination, uint32_t bytes_per_row) = 0;
 };
 
@@ -71,6 +97,7 @@ public:
   virtual std::unique_ptr<Buffer> create_buffer(const BufferDesc& desc) = 0;
   virtual std::unique_ptr<Texture> create_texture(const TextureDesc& desc) = 0;
   virtual std::unique_ptr<CommandList> create_command_list() = 0;
+  virtual std::unique_ptr<RenderPipeline> create_render_pipeline(const RenderPipelineDesc& desc) = 0;
   virtual void submit(CommandList& list) = 0;
   virtual void wait_idle() = 0;
 };

@@ -46,6 +46,17 @@ public:
   }
 };
 
+class VulkanRenderPipeline final : public RenderPipeline {
+public:
+  VkDevice device = VK_NULL_HANDLE;
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  ~VulkanRenderPipeline() override {
+    vkDestroyPipeline(device, pipeline, nullptr);
+    vkDestroyPipelineLayout(device, layout, nullptr);
+  }
+};
+
 class VulkanCommandList final : public CommandList {
 public:
   VkDevice device = VK_NULL_HANDLE;
@@ -98,8 +109,23 @@ public:
     info.colorAttachmentCount = 1;
     info.pColorAttachments = &color;
     vkCmdBeginRendering(list, &info);
+    // Flipped, for the orientation of clip space D3D12 has.
+    const VkViewport viewport{0.0f,
+                              static_cast<float>(texture.height),
+                              static_cast<float>(texture.width),
+                              -static_cast<float>(texture.height),
+                              0.0f,
+                              1.0f};
+    const VkRect2D scissor{{0, 0}, {texture.width, texture.height}};
+    vkCmdSetViewport(list, 0, 1, &viewport);
+    vkCmdSetScissor(list, 0, 1, &scissor);
   }
   void end_render_pass() override { vkCmdEndRendering(list); }
+
+  void set_pipeline(RenderPipeline& pipeline) override {
+    vkCmdBindPipeline(list, VK_PIPELINE_BIND_POINT_GRAPHICS, static_cast<VulkanRenderPipeline&>(pipeline).pipeline);
+  }
+  void draw(uint32_t vertices) override { vkCmdDraw(list, vertices, 1, 0, 0); }
 
   void copy_texture_to_buffer(Texture& source, Buffer& destination, uint32_t bytes_per_row) override {
     auto& texture = static_cast<VulkanTexture&>(source);
@@ -208,6 +234,79 @@ public:
     if (vkAllocateCommandBuffers(device, &info, &list->list) != VK_SUCCESS)
       return nullptr;
     return list;
+  }
+
+  VkShaderModule create_module(const ShaderCode& code) {
+    VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    info.codeSize = code.size();
+    info.pCode = reinterpret_cast<const uint32_t*>(code.data());
+    VkShaderModule module = VK_NULL_HANDLE;
+    vkCreateShaderModule(device, &info, nullptr, &module);
+    return module;
+  }
+
+  std::unique_ptr<RenderPipeline> create_render_pipeline(const RenderPipelineDesc& desc) override {
+    auto pipeline = std::make_unique<VulkanRenderPipeline>();
+    pipeline->device = device;
+    VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    if (vkCreatePipelineLayout(device, &layout, nullptr, &pipeline->layout) != VK_SUCCESS)
+      return nullptr;
+    VkShaderModule vertex = create_module(*desc.vertex);
+    VkShaderModule fragment = create_module(*desc.fragment);
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertex;
+    stages[0].pName = desc.vertex_entry;
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fragment;
+    stages[1].pName = desc.fragment_entry;
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState attachment{};
+    attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                                VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend.attachmentCount = 1;
+    blend.pAttachments = &attachment;
+    const VkDynamicState dynamics[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamics;
+    const VkFormat format = to_vk(desc.color_format);
+    VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachmentFormats = &format;
+    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    info.pNext = &rendering;
+    info.stageCount = 2;
+    info.pStages = stages;
+    info.pVertexInputState = &vertex_input;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pColorBlendState = &blend;
+    info.pDynamicState = &dynamic;
+    info.layout = pipeline->layout;
+    const VkResult result =
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline->pipeline);
+    vkDestroyShaderModule(device, vertex, nullptr);
+    vkDestroyShaderModule(device, fragment, nullptr);
+    if (result != VK_SUCCESS)
+      return nullptr;
+    return pipeline;
   }
 
   void submit(CommandList& list) override {

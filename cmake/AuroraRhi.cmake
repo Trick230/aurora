@@ -13,12 +13,20 @@ FetchContent_Declare(aurora_volk
 FetchContent_Declare(aurora_vma
         GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
         GIT_TAG v3.5.0 GIT_SHALLOW TRUE SOURCE_SUBDIR _none)
-FetchContent_MakeAvailable(aurora_vulkan_headers aurora_volk aurora_vma)
+FetchContent_Declare(aurora_dxc
+        URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip
+        URL_HASH SHA256=ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1
+        DOWNLOAD_EXTRACT_TIMESTAMP FALSE SOURCE_SUBDIR _none)
+FetchContent_MakeAvailable(aurora_vulkan_headers aurora_volk aurora_vma aurora_dxc)
+
+# DXC runs at run time, for the shaders generated then; these go next to the executable.
+set(AURORA_RHI_RUNTIME_FILES "${aurora_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "${aurora_dxc_SOURCE_DIR}/bin/x64/dxil.dll")
 
 set(_aurora_rhi_dir "${CMAKE_CURRENT_LIST_DIR}/../lib/rhi")
 add_library(aurora_rhi STATIC
         ${_aurora_rhi_dir}/rhi.cpp
         ${_aurora_rhi_dir}/vulkan.cpp
+        ${_aurora_rhi_dir}/shader_compiler.cpp
         ${aurora_volk_SOURCE_DIR}/volk.c)
 set_target_properties(aurora_rhi PROPERTIES FOLDER "aurora")
 target_include_directories(aurora_rhi PUBLIC ${_aurora_rhi_dir})
