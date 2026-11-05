@@ -453,7 +453,10 @@ public:
     buffer->size = desc.size;
     buffer->rest = desc.memory == MemoryKind::Readback ? D3D12_RESOURCE_STATE_COPY_DEST
                                                        : D3D12_RESOURCE_STATE_GENERIC_READ;
-    if (FAILED(allocator->CreateResource(&heap, &info, buffer->rest, nullptr, &buffer->allocation, IID_NULL, nullptr)))
+    // Buffers in the default heap are always created in the common state, which
+    // reads promote from without a barrier.
+    const D3D12_RESOURCE_STATES initial = desc.memory == MemoryKind::Device ? D3D12_RESOURCE_STATE_COMMON : buffer->rest;
+    if (FAILED(allocator->CreateResource(&heap, &info, initial, nullptr, &buffer->allocation, IID_NULL, nullptr)))
       return nullptr;
     buffer->resource = buffer->allocation->GetResource();
     buffer->address = buffer->resource->GetGPUVirtualAddress();
@@ -465,6 +468,10 @@ public:
   std::unique_ptr<Texture> create_texture(const TextureDesc& desc) override {
     D3D12MA::ALLOCATION_DESC heap{};
     heap.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+    // Targets get memory of their own: it starts zeroed, where a placed target would
+    // have to be cleared or discarded before anything else could touch it.
+    if (desc.usage & (TextureColorTarget | TextureDepthTarget))
+      heap.Flags = D3D12MA::ALLOCATION_FLAG_COMMITTED;
     const bool depth = desc.format == Format::Depth32Float;
     D3D12_RESOURCE_DESC info{};
     info.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -522,7 +529,7 @@ public:
     native.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     native.MipLODBias = desc.lod_bias;
     native.MaxAnisotropy = desc.anisotropy;
-    native.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    native.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
     native.MaxLOD = D3D12_FLOAT32_MAX;
     return sampler;
   }
@@ -989,8 +996,16 @@ std::unique_ptr<Device> create_d3d12_device(const DeviceOptions& options, std::s
     *error = "no adapter with D3D12 feature level 12_0";
     return nullptr;
   }
-  if (options.validation)
-    result->device.As(&result->info_queue);
+  if (options.validation && SUCCEEDED(result->device.As(&result->info_queue))) {
+    // Clear colors vary with what the game asks for, so no value can be promised at
+    // a target's creation; the layer's advice about it is not an error.
+    D3D12_MESSAGE_ID ignored[] = {D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+                                  D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE};
+    D3D12_INFO_QUEUE_FILTER filter{};
+    filter.DenyList.NumIDs = 2;
+    filter.DenyList.pIDList = ignored;
+    result->info_queue->AddStorageFilterEntries(&filter);
+  }
   D3D12MA::ALLOCATOR_DESC allocator{};
   allocator.pDevice = result->device.Get();
   allocator.pAdapter = adapter.Get();

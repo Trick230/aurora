@@ -524,6 +524,8 @@ public:
       info.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     VmaAllocationCreateInfo memory{};
     memory.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (desc.usage & (TextureColorTarget | TextureDepthTarget))
+      memory.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     auto texture = std::make_unique<VulkanTexture>();
     texture->owner = this;
     if (vmaCreateImage(allocator, &info, &memory, &texture->image, &texture->allocation, nullptr) != VK_SUCCESS)
