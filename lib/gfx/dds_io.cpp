@@ -9,7 +9,7 @@
 
 namespace aurora::gfx::dds {
 struct ParsedDDSLayout {
-  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+  rhi::Format format = rhi::Format::Undefined;
   size_t dataOffset = 0;
 };
 
@@ -137,76 +137,20 @@ std::optional<uint32_t> resolve_mip_count(const DDSHeader& header) noexcept {
   return header.mipMapCount;
 }
 
-std::optional<wgpu::TextureFormat> resolve_dx10_format(uint32_t dxgiFormat) noexcept {
+std::optional<rhi::Format> resolve_dx10_format(uint32_t dxgiFormat) noexcept {
   switch (dxgiFormat) {
   case 28:
-    return wgpu::TextureFormat::RGBA8Unorm;
+    return rhi::Format::RGBA8Unorm;
   case 87:
-    return wgpu::TextureFormat::BGRA8Unorm;
+    return rhi::Format::BGRA8Unorm;
   case 71:
-    return wgpu::TextureFormat::BC1RGBAUnorm;
+    return rhi::Format::BC1;
   case 77:
-    return wgpu::TextureFormat::BC3RGBAUnorm;
+    return rhi::Format::BC3;
   case 83:
-    return wgpu::TextureFormat::BC5RGUnorm;
+    return rhi::Format::BC5;
   case 98:
-    return wgpu::TextureFormat::BC7RGBAUnorm;
-  case 134:
-    return wgpu::TextureFormat::ASTC4x4Unorm;
-  case 135:
-    return wgpu::TextureFormat::ASTC4x4UnormSrgb;
-  case 138:
-    return wgpu::TextureFormat::ASTC5x4Unorm;
-  case 139:
-    return wgpu::TextureFormat::ASTC5x4UnormSrgb;
-  case 142:
-    return wgpu::TextureFormat::ASTC5x5Unorm;
-  case 143:
-    return wgpu::TextureFormat::ASTC5x5UnormSrgb;
-  case 146:
-    return wgpu::TextureFormat::ASTC6x5Unorm;
-  case 147:
-    return wgpu::TextureFormat::ASTC6x5UnormSrgb;
-  case 150:
-    return wgpu::TextureFormat::ASTC6x6Unorm;
-  case 151:
-    return wgpu::TextureFormat::ASTC6x6UnormSrgb;
-  case 154:
-    return wgpu::TextureFormat::ASTC8x5Unorm;
-  case 155:
-    return wgpu::TextureFormat::ASTC8x5UnormSrgb;
-  case 158:
-    return wgpu::TextureFormat::ASTC8x6Unorm;
-  case 159:
-    return wgpu::TextureFormat::ASTC8x6UnormSrgb;
-  case 162:
-    return wgpu::TextureFormat::ASTC8x8Unorm;
-  case 163:
-    return wgpu::TextureFormat::ASTC8x8UnormSrgb;
-  case 166:
-    return wgpu::TextureFormat::ASTC10x5Unorm;
-  case 167:
-    return wgpu::TextureFormat::ASTC10x5UnormSrgb;
-  case 170:
-    return wgpu::TextureFormat::ASTC10x6Unorm;
-  case 171:
-    return wgpu::TextureFormat::ASTC10x6UnormSrgb;
-  case 174:
-    return wgpu::TextureFormat::ASTC10x8Unorm;
-  case 175:
-    return wgpu::TextureFormat::ASTC10x8UnormSrgb;
-  case 178:
-    return wgpu::TextureFormat::ASTC10x10Unorm;
-  case 179:
-    return wgpu::TextureFormat::ASTC10x10UnormSrgb;
-  case 182:
-    return wgpu::TextureFormat::ASTC12x10Unorm;
-  case 183:
-    return wgpu::TextureFormat::ASTC12x10UnormSrgb;
-  case 186:
-    return wgpu::TextureFormat::ASTC12x12Unorm;
-  case 187:
-    return wgpu::TextureFormat::ASTC12x12UnormSrgb;
+    return rhi::Format::BC7;
   default:
     return std::nullopt;
   }
@@ -218,13 +162,13 @@ std::optional<ParsedDDSLayout> resolve_dds_layout(ArrayRef<uint8_t> bytes, const
   if ((header.ddspf.flags & 0x00000004) != 0) { // DDS has FourCC
     switch (header.ddspf.fourCC) {
     case 0x31545844:
-      out.format = wgpu::TextureFormat::BC1RGBAUnorm;
+      out.format = rhi::Format::BC1;
       return out;
     case 0x35545844:
-      out.format = wgpu::TextureFormat::BC3RGBAUnorm;
+      out.format = rhi::Format::BC3;
       return out;
     case 0x32495441:
-      out.format = wgpu::TextureFormat::BC5RGUnorm;
+      out.format = rhi::Format::BC5;
       return out;
     case 0x30315844: {
       if (bytes.size() < out.dataOffset + sizeof(DDSHeaderDX10)) {
@@ -250,12 +194,12 @@ std::optional<ParsedDDSLayout> resolve_dds_layout(ArrayRef<uint8_t> bytes, const
   if ((header.ddspf.flags & 0x00000040) != 0 && header.ddspf.rgbBitCount == 32) {
     if (header.ddspf.rBitMask == 0x000000FF && header.ddspf.gBitMask == 0x0000FF00 &&
         header.ddspf.bBitMask == 0x00FF0000 && header.ddspf.aBitMask == 0xFF000000) {
-      out.format = wgpu::TextureFormat::RGBA8Unorm;
+      out.format = rhi::Format::RGBA8Unorm;
       return out;
     }
     if (header.ddspf.rBitMask == 0x00FF0000 && header.ddspf.gBitMask == 0x0000FF00 &&
         header.ddspf.bBitMask == 0x000000FF && header.ddspf.aBitMask == 0xFF000000) {
-      out.format = wgpu::TextureFormat::BGRA8Unorm;
+      out.format = rhi::Format::BGRA8Unorm;
       return out;
     }
   }

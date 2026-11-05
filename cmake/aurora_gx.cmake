@@ -9,7 +9,9 @@ add_library(aurora_gx STATIC
         lib/gfx/texture.cpp
         lib/gfx/texture_format.cpp
         lib/gfx/texture_convert.cpp
-        lib/gfx/texture_replacement_off.cpp
+        lib/gfx/dds_io.cpp
+        lib/gfx/png_io.cpp
+        lib/gfx/texture_replacement.cpp
         lib/gx/attr_fmt.cpp
         lib/gx/command_processor.cpp
         lib/gx/efb_copy.cpp
@@ -26,4 +28,4 @@ add_library(aurora::gx ALIAS aurora_gx)
 set_target_properties(aurora_gx PROPERTIES FOLDER "aurora")
 
 target_link_libraries(aurora_gx PUBLIC aurora::core xxhash)
-target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3)
+target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 PNG::PNG)

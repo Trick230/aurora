@@ -439,58 +439,7 @@ bool remove_mipmaps(aurora::gfx::ConvertedTexture& texture) noexcept {
   return true;
 }
 
-constexpr bool is_unsupported_texture_format(wgpu::TextureFormat format) {
-  switch (format) {
-  case wgpu::TextureFormat::BC1RGBAUnorm:
-  case wgpu::TextureFormat::BC1RGBAUnormSrgb:
-  case wgpu::TextureFormat::BC2RGBAUnorm:
-  case wgpu::TextureFormat::BC2RGBAUnormSrgb:
-  case wgpu::TextureFormat::BC3RGBAUnorm:
-  case wgpu::TextureFormat::BC3RGBAUnormSrgb:
-  case wgpu::TextureFormat::BC4RUnorm:
-  case wgpu::TextureFormat::BC4RSnorm:
-  case wgpu::TextureFormat::BC5RGUnorm:
-  case wgpu::TextureFormat::BC5RGSnorm:
-  case wgpu::TextureFormat::BC6HRGBUfloat:
-  case wgpu::TextureFormat::BC6HRGBFloat:
-  case wgpu::TextureFormat::BC7RGBAUnorm:
-  case wgpu::TextureFormat::BC7RGBAUnormSrgb:
-    return !aurora::webgpu::g_bcTexturesSupported;
-  case wgpu::TextureFormat::ASTC4x4Unorm:
-  case wgpu::TextureFormat::ASTC4x4UnormSrgb:
-  case wgpu::TextureFormat::ASTC5x4Unorm:
-  case wgpu::TextureFormat::ASTC5x4UnormSrgb:
-  case wgpu::TextureFormat::ASTC5x5Unorm:
-  case wgpu::TextureFormat::ASTC5x5UnormSrgb:
-  case wgpu::TextureFormat::ASTC6x5Unorm:
-  case wgpu::TextureFormat::ASTC6x5UnormSrgb:
-  case wgpu::TextureFormat::ASTC6x6Unorm:
-  case wgpu::TextureFormat::ASTC6x6UnormSrgb:
-  case wgpu::TextureFormat::ASTC8x5Unorm:
-  case wgpu::TextureFormat::ASTC8x5UnormSrgb:
-  case wgpu::TextureFormat::ASTC8x6Unorm:
-  case wgpu::TextureFormat::ASTC8x6UnormSrgb:
-  case wgpu::TextureFormat::ASTC8x8Unorm:
-  case wgpu::TextureFormat::ASTC8x8UnormSrgb:
-  case wgpu::TextureFormat::ASTC10x5Unorm:
-  case wgpu::TextureFormat::ASTC10x5UnormSrgb:
-  case wgpu::TextureFormat::ASTC10x6Unorm:
-  case wgpu::TextureFormat::ASTC10x6UnormSrgb:
-  case wgpu::TextureFormat::ASTC10x8Unorm:
-  case wgpu::TextureFormat::ASTC10x8UnormSrgb:
-  case wgpu::TextureFormat::ASTC10x10Unorm:
-  case wgpu::TextureFormat::ASTC10x10UnormSrgb:
-  case wgpu::TextureFormat::ASTC12x10Unorm:
-  case wgpu::TextureFormat::ASTC12x10UnormSrgb:
-  case wgpu::TextureFormat::ASTC12x12Unorm:
-  case wgpu::TextureFormat::ASTC12x12UnormSrgb:
-    return !aurora::webgpu::g_astcTexturesSupported;
-  default:
-    return false;
-  }
-}
-
-bool validate_texture_size(wgpu::TextureFormat format, uint32_t width, uint32_t height,
+bool validate_texture_size(aurora::rhi::Format format, uint32_t width, uint32_t height,
                            std::string_view label) noexcept {
   if (aurora::gfx::is_block_aligned(format, width, height)) {
     return true;
@@ -508,11 +457,6 @@ std::optional<aurora::gfx::ConvertedTexture> load_file_replacement(const Replace
   auto base = load_texture_file(entry.path);
   if (!base.has_value()) {
     Log.warn("texture_replacement: failed to load texture {}", fs_path_to_string(entry.path));
-    return std::nullopt;
-  }
-  if (is_unsupported_texture_format(base->format)) {
-    Log.warn("texture_replacement: failed to load texture {} due to unsupported format: {}",
-             fs_path_to_string(entry.path), static_cast<uint32_t>(base->format));
     return std::nullopt;
   }
   if (!validate_texture_size(base->format, base->width, base->height, fs_path_to_string(entry.path))) {
@@ -599,33 +543,12 @@ std::optional<aurora::gfx::ConvertedTexture> load_file_replacement(const Replace
 aurora::gfx::TextureHandle create_converted_texture_handle(const aurora::texture::TextureSourceKey& key,
                                                            const ReplacementEntry& entry,
                                                            const aurora::gfx::ConvertedTexture& replacement) noexcept {
-  const auto label = entry.label.empty() ? fmt::format("TextureReplacement {}", entry.id) : entry.label;
-  const wgpu::Extent3D size{
-      .width = replacement.width,
-      .height = replacement.height,
-      .depthOrArrayLayers = 1,
-  };
-  const wgpu::TextureDescriptor textureDescriptor{
-      .label = label.c_str(),
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = replacement.format,
-      .mipLevelCount = replacement.mips,
-      .sampleCount = 1,
-  };
-  auto texture = g_device.CreateTexture(&textureDescriptor);
-  const auto viewLabel = fmt::format("{} view", label);
-  const wgpu::TextureViewDescriptor textureViewDescriptor{
-      .label = viewLabel.c_str(),
-      .format = replacement.format,
-      .dimension = wgpu::TextureViewDimension::e2D,
-      .mipLevelCount = replacement.mips,
-  };
-  auto textureView = texture.CreateView(&textureViewDescriptor);
-  auto handle = std::make_shared<aurora::gfx::TextureRef>(std::move(texture), std::move(textureView),
-                                                          wgpu::TextureView{}, size, replacement.format,
-                                                          replacement.mips, aurora::gfx::InvalidTextureFormat);
+  std::shared_ptr<aurora::rhi::Texture> texture = g_device->create_texture(
+      {replacement.width, replacement.height, replacement.mips, 1, replacement.format, aurora::rhi::TextureSampled});
+  std::shared_ptr<aurora::rhi::TextureView> view = texture->create_view({});
+  auto handle = std::make_shared<aurora::gfx::TextureRef>(
+      std::move(texture), std::move(view), aurora::gfx::Extent3D{replacement.width, replacement.height, 1},
+      replacement.format, replacement.mips, aurora::gfx::InvalidTextureFormat);
   handle->isReplacement = true;
   aurora::gfx::write_texture(*handle, replacement.data);
   return handle;
@@ -760,8 +683,8 @@ bool dump_editable_texture_dds(const aurora::texture::TextureSourceKey& key, con
     pixels = aurora::gfx::convert_texture(obj.format(), texWidth, texHeight, 1, texData);
   }
 
-  const uint64_t rgbaBytes = aurora::gfx::calc_texture_size(wgpu::TextureFormat::RGBA8Unorm, texWidth, texHeight, 1);
-  if (pixels.data.empty() || pixels.format != wgpu::TextureFormat::RGBA8Unorm || pixels.data.size() != rgbaBytes) {
+  const uint64_t rgbaBytes = aurora::gfx::calc_texture_size(aurora::rhi::Format::RGBA8Unorm, texWidth, texHeight, 1);
+  if (pixels.data.empty() || pixels.format != aurora::rhi::Format::RGBA8Unorm || pixels.data.size() != rgbaBytes) {
     return false;
   }
 
