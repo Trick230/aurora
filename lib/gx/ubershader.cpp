@@ -10,7 +10,7 @@
 
 #include "pipeline.hpp"
 
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "shader_hlsl.hpp"
 #include "shader_info.hpp"
 
@@ -333,8 +333,8 @@ std::shared_ptr<rhi::RenderPipeline> create_uber_pipeline(const PipelineConfig& 
   auto& entry = shaders[static_cast<size_t>(mode)];
   std::call_once(entry.once, [&] {
     const auto source = hlsl::uber_source(mode);
-    entry.vertex = webgpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
-    entry.fragment = webgpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
+    entry.vertex = gpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
+    entry.fragment = gpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
   });
   return build_pipeline(config, mode, entry.vertex, entry.fragment);
 }

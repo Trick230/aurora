@@ -1,7 +1,7 @@
 #include "window.hpp"
 
 #include "imgui.hpp"
-#include "webgpu/gpu.hpp"
+#include "gpu/gpu.hpp"
 #include "internal.hpp"
 
 #include <aurora/aurora.h>
@@ -63,7 +63,7 @@ void resize_swapchain() noexcept {
     Log.info("Display scale changed to {}", size.scale);
   }
   g_windowSize = size;
-  webgpu::resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height);
+  gpu::resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height);
 }
 
 void set_window_icon() noexcept {
@@ -110,7 +110,7 @@ void process_event(SDL_Event& event) {
     break;
   default:
     if (event.type == g_sdlCustomEventsStart + CustomEvent::RefreshSurface) {
-      webgpu::refresh_surface(false);
+      gpu::refresh_surface(false);
     }
     break;
   }

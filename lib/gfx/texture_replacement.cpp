@@ -3,7 +3,7 @@
 #include "../fs_helper.hpp"
 #include "../gx/gx.hpp"
 #include "../internal.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "dds_io.hpp"
 #include "png_io.hpp"
 #include "texture_convert.hpp"
@@ -29,7 +29,7 @@
 #include <vector>
 
 using namespace aurora::gx;
-using aurora::webgpu::g_device;
+using aurora::gpu::g_device;
 
 namespace {
 aurora::Module Log("aurora::texture");

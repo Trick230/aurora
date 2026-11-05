@@ -2,7 +2,7 @@
 
 #include "../internal.hpp"
 #include "../gx/gx.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "texture.hpp"
 #include "../gx/gx_fmt.hpp"
 
@@ -15,7 +15,7 @@ using namespace std::string_literals;
 namespace aurora::gfx::tex_copy_conv {
 static Module Log("aurora::gfx::tex_copy_conv");
 
-using webgpu::g_device;
+using gpu::g_device;
 
 static constexpr std::string_view VertexShader = R"(
 struct VertexOutput {
@@ -320,8 +320,8 @@ static Pipeline create_pipeline(std::string_view fragShader, rhi::Format format,
                                 rhi::PipelineLayout* layout) {
   std::string source = preamble;
   source += fragShader;
-  const auto vs = webgpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
-  const auto fs = webgpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
+  const auto vs = gpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
+  const auto fs = gpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
   rhi::RenderPipelineDesc desc;
   desc.layout = layout;
   desc.vertex = &vs;
@@ -353,7 +353,7 @@ void initialize() {
   g_depthPipelineLayout = g_device->create_pipeline_layout({depthGroups, 1});
 
   g_blitPipeline =
-      create_pipeline(FragPassthrough, webgpu::g_graphicsConfig.surfaceFormat, ShaderPreamble, g_pipelineLayout.get());
+      create_pipeline(FragPassthrough, gpu::g_graphicsConfig.surfaceFormat, ShaderPreamble, g_pipelineLayout.get());
   for (const auto& conv : ConvPipelines) {
     g_pipelines[conv.fmt] = create_pipeline(conv.fragShader, to_rhi(conv.fmt), ShaderPreamble, g_pipelineLayout.get());
   }

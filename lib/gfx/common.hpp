@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../internal.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "refs.hpp"
 
 #include <cstdint>
@@ -211,7 +211,7 @@ struct ClipRect {
   bool operator!=(const ClipRect& rhs) const { return !(*this == rhs); }
 };
 
-using webgpu::Viewport;
+using gpu::Viewport;
 
 struct Extent3D {
   uint32_t width = 0;

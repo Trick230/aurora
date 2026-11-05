@@ -1,13 +1,13 @@
 #include "clear.hpp"
 
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 
 #include <mutex>
 
 namespace aurora::gfx::clear {
 
-using webgpu::g_device;
-using webgpu::g_graphicsConfig;
+using gpu::g_device;
+using gpu::g_graphicsConfig;
 
 static constexpr const char* ClearShader = R"(
 static const float2 positions[3] = {float2(-1.0, 1.0), float2(-1.0, -3.0), float2(3.0, 1.0)};
@@ -27,8 +27,8 @@ std::shared_ptr<rhi::RenderPipeline> create_pipeline(const PipelineConfig& confi
     std::scoped_lock lock{mutex};
     if (!layout) {
       layout = g_device->create_pipeline_layout({nullptr, 0});
-      vertex = webgpu::compile_shader(rhi::ShaderStage::Vertex, ClearShader, "vs_main");
-      fragment = webgpu::compile_shader(rhi::ShaderStage::Fragment, ClearShader, "fs_main");
+      vertex = gpu::compile_shader(rhi::ShaderStage::Vertex, ClearShader, "vs_main");
+      fragment = gpu::compile_shader(rhi::ShaderStage::Fragment, ClearShader, "fs_main");
     }
   }
   rhi::RenderPipelineDesc desc;

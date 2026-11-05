@@ -1,7 +1,7 @@
 #include "common.hpp"
 
 #include "../internal.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "aurora/aurora.h"
 #include "texture.hpp"
 #include "texture_convert.hpp"
@@ -15,7 +15,7 @@
 #include <fmt/format.h>
 
 namespace aurora::gfx {
-using webgpu::g_device;
+using gpu::g_device;
 
 namespace {
 Module Log("aurora::gfx");
@@ -110,7 +110,7 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
 
 TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
   (void)label;
-  return new_target(width, height, webgpu::g_graphicsConfig.surfaceFormat, gxFormat);
+  return new_target(width, height, gpu::g_graphicsConfig.surfaceFormat, gxFormat);
 }
 
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {

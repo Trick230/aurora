@@ -17,7 +17,7 @@
 #include "../internal.hpp"
 #include "../window.hpp"
 
-namespace aurora::webgpu {
+namespace aurora::gpu {
 static Module Log("aurora::gpu");
 
 static std::unique_ptr<rhi::Device> s_device;
@@ -479,4 +479,4 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uin
   gfx::gpu_synchronize();
   resize_swapchain_internal(width, height, nativeWidth, nativeHeight, force);
 }
-} // namespace aurora::webgpu
+} // namespace aurora::gpu

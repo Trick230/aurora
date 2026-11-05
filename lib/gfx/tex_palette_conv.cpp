@@ -1,7 +1,7 @@
 #include "tex_palette_conv.hpp"
 
 #include "../internal.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "texture.hpp"
 
 #include <array>
@@ -10,7 +10,7 @@
 namespace aurora::gfx::tex_palette_conv {
 static Module Log("aurora::gfx::tex_palette_conv");
 
-using webgpu::g_device;
+using gpu::g_device;
 
 static constexpr std::string_view ShaderPreambleVtx = R"(
 struct VertexOutput {
@@ -75,8 +75,8 @@ static std::unique_ptr<rhi::RenderPipeline> g_fromFloat4Pipeline;
 static std::unique_ptr<rhi::RenderPipeline> create_pipeline(std::string_view fragment) {
   std::string source{ShaderPreambleVtx};
   source += fragment;
-  const auto vs = webgpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
-  const auto fs = webgpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
+  const auto vs = gpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
+  const auto fs = gpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
   rhi::RenderPipelineDesc desc;
   desc.layout = g_pipelineLayout.get();
   desc.vertex = &vs;

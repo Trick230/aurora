@@ -3,7 +3,7 @@
 #include "render_worker.hpp"
 #include "../gx/gx.hpp"
 #include "../internal.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "../window.hpp"
 
 #include <SDL3/SDL_video.h>
@@ -40,7 +40,7 @@ namespace {
 Module Log("aurora::gfx::interp");
 
 using Clock = std::chrono::steady_clock;
-using webgpu::g_device;
+using gpu::g_device;
 
 // The matrices of a GX uniform block, in floats (gx/shader_info.cpp
 // build_uniform): the projection, the position matrices, the texture matrices
@@ -1290,7 +1290,7 @@ void activate(Clock::time_point base) {
 // the older one at t = 1.
 void capture(float t, const char* name) {
   static const char* dir = std::getenv("AURORA_INTERP_CHECK");
-  const auto& source = webgpu::present_source();
+  const auto& source = gpu::present_source();
   const uint32_t width = source.size.width;
   const uint32_t height = source.size.height;
   const uint32_t row = AURORA_ALIGN(width * 4, 256);

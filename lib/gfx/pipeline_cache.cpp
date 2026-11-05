@@ -4,7 +4,7 @@
 #include "../fs_helper.hpp"
 #include "../gx/pipeline.hpp"
 #include "../sqlite_utils.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -960,7 +960,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
     // made with MSAA on, run with it off) becomes this run's: the passes that
     // were multisampled are now single-sampled, and alpha to coverage needs
     // samples.
-    const uint32_t samples = webgpu::g_graphicsConfig.msaaSamples;
+    const uint32_t samples = gpu::g_graphicsConfig.msaaSamples;
     if (config.msaaSamples != 1 && config.msaaSamples != samples) {
       config.msaaSamples = samples;
       if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {

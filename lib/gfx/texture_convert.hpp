@@ -2,7 +2,7 @@
 
 #include "common.hpp"
 #include "texture.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 
 namespace aurora::gfx {
 inline bool is_pc_texture_format(u32 gxFormat) noexcept {

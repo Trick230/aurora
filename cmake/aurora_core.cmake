@@ -3,7 +3,7 @@ add_library(aurora_core STATIC
         lib/imgui.cpp
         lib/logging.cpp
         lib/window.cpp
-        lib/webgpu/gpu.cpp
+        lib/gpu/gpu.cpp
 )
 add_library(aurora::core ALIAS aurora_core)
 set_target_properties(aurora_core PROPERTIES FOLDER "aurora")

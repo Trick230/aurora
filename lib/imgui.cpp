@@ -13,7 +13,7 @@
 #include "internal.hpp"
 #include "gfx/render_worker.hpp"
 #include "gfx/texture.hpp"
-#include "webgpu/gpu.hpp"
+#include "gpu/gpu.hpp"
 #include "window.hpp"
 
 #include "backends/imgui_impl_sdl3.h"
@@ -28,7 +28,7 @@ static bool g_active = false;
 static bool g_frameStarted = false;
 
 
-using webgpu::g_device;
+using gpu::g_device;
 
 static_assert(sizeof(ImDrawIdx) == 2, "ImGui draws with 16-bit indices");
 static_assert(sizeof(ImDrawVert) == 20, "the shader reads ImDrawVert by hand");
@@ -79,15 +79,15 @@ static void create_pipeline() {
   g_textureLayout = g_device->create_bind_group_layout({texture, 2});
   rhi::BindGroupLayout* groups[] = {g_vertexLayout.get(), g_textureLayout.get()};
   g_pipelineLayout = g_device->create_pipeline_layout({groups, 2});
-  const auto vs = webgpu::compile_shader(rhi::ShaderStage::Vertex, Shader, "vs_main");
-  const auto fs = webgpu::compile_shader(rhi::ShaderStage::Fragment, Shader, "fs_main");
+  const auto vs = gpu::compile_shader(rhi::ShaderStage::Vertex, Shader, "vs_main");
+  const auto fs = gpu::compile_shader(rhi::ShaderStage::Fragment, Shader, "fs_main");
   rhi::RenderPipelineDesc desc;
   desc.layout = g_pipelineLayout.get();
   desc.vertex = &vs;
   desc.vertex_entry = "vs_main";
   desc.fragment = &fs;
   desc.fragment_entry = "fs_main";
-  desc.color_format = webgpu::g_graphicsConfig.surfaceFormat;
+  desc.color_format = gpu::g_graphicsConfig.surfaceFormat;
   desc.blend = true;
   desc.blend_color = {rhi::BlendFactor::SrcAlpha, rhi::BlendFactor::OneMinusSrcAlpha};
   desc.blend_alpha = {rhi::BlendFactor::One, rhi::BlendFactor::OneMinusSrcAlpha};

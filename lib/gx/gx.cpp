@@ -1,7 +1,7 @@
 #include "gx.hpp"
 
 #include "pipeline.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "../internal.hpp"
 #include "../gfx/common.hpp"
 #include "../gfx/lru_cache.hpp"
@@ -27,8 +27,8 @@
 static aurora::Module Log("aurora::gx");
 
 namespace aurora::gx {
-using webgpu::g_device;
-using webgpu::g_graphicsConfig;
+using gpu::g_device;
+using gpu::g_graphicsConfig;
 
 GXState g_gxState{};
 
@@ -830,9 +830,9 @@ static u16 to_anisotropy(GXAnisotropy aniso) {
   case GX_MAX_ANISOTROPY:
     return 1;
   case GX_ANISO_2:
-    return std::max<u16>(aurora::webgpu::g_graphicsConfig.textureAnisotropy / 2, 1);
+    return std::max<u16>(aurora::gpu::g_graphicsConfig.textureAnisotropy / 2, 1);
   case GX_ANISO_4:
-    return std::max<u16>(aurora::webgpu::g_graphicsConfig.textureAnisotropy, 1);
+    return std::max<u16>(aurora::gpu::g_graphicsConfig.textureAnisotropy, 1);
   }
 }
 
@@ -846,7 +846,7 @@ rhi::SamplerDesc aurora::gfx::TextureBind::get_descriptor() const noexcept {
   desc.min_lod = texObj.min_lod();
   desc.max_lod = texObj.max_lod();
   u16 maxAnisotropy = aurora::g_config.forceTextureAnisotropy
-                          ? std::max<u16>(aurora::webgpu::g_graphicsConfig.textureAnisotropy, 1)
+                          ? std::max<u16>(aurora::gpu::g_graphicsConfig.textureAnisotropy, 1)
                           : to_anisotropy(texObj.max_aniso());
   if (ref && ref->isReplacement) {
     desc.min_lod = 0.f;

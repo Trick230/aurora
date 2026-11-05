@@ -11,7 +11,7 @@
 
 struct SDL_Window;
 
-namespace aurora::webgpu {
+namespace aurora::gpu {
 struct GraphicsConfig {
   rhi::Format surfaceFormat;
   uint32_t surfaceWidth;
@@ -69,4 +69,4 @@ const TextureWithSampler& resample_present_source(rhi::CommandList& list, const 
 // A pipeline's shaders from one HLSL source with vs_main and fs_main; fatal if it
 // doesn't compile, since these sources are ours.
 rhi::ShaderCode compile_shader(rhi::ShaderStage stage, const std::string& source, const char* entry);
-} // namespace aurora::webgpu
+} // namespace aurora::gpu

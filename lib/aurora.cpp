@@ -3,7 +3,7 @@
 #include "gfx/common.hpp"
 #include "gfx/render_worker.hpp"
 #include "imgui.hpp"
-#include "webgpu/gpu.hpp"
+#include "gpu/gpu.hpp"
 
 #include "internal.hpp"
 #include "window.hpp"
@@ -26,8 +26,8 @@ namespace {
 Module Log("aurora");
 
 // GPU
-using webgpu::g_device;
-using webgpu::g_surface;
+using gpu::g_device;
+using gpu::g_surface;
 
 uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
   if (!std::isfinite(value)) {
@@ -50,7 +50,7 @@ struct FrameDump {
 };
 
 FrameDump frame_dump_copy(rhi::CommandList& list) {
-  const auto& source = webgpu::present_source();
+  const auto& source = gpu::present_source();
   FrameDump dump{.width = source.size.width, .height = source.size.height};
   dump.row = AURORA_ALIGN(dump.width * 4, 256);
   dump.bgra = source.format == rhi::Format::BGRA8Unorm;
@@ -149,7 +149,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
   bool windowCreated = false;
   if (selectedBackend != BACKEND_AUTO && window::create_window()) {
-    if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
+    if (gpu::initialize(selectedBackend, config.allowCpuAdapter)) {
       windowCreated = true;
     } else {
       window::destroy_window();
@@ -162,7 +162,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
       if (!window::create_window()) {
         continue;
       }
-      if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
+      if (gpu::initialize(selectedBackend, config.allowCpuAdapter)) {
         windowCreated = true;
         break;
       } else {
@@ -196,7 +196,7 @@ void shutdown() noexcept {
   gfx::render_worker::synchronize();
   imgui::shutdown();
   gfx::shutdown();
-  webgpu::shutdown();
+  gpu::shutdown();
   window::shutdown();
 }
 
@@ -207,14 +207,14 @@ const AuroraEvent* update() noexcept {
 bool begin_frame() noexcept {
   {
     if (!window::is_presentable()) {
-      webgpu::release_surface();
+      gpu::release_surface();
       return false;
     }
     if (window::is_paused()) {
       return false;
     }
     if (g_surface == nullptr) {
-      webgpu::refresh_surface(true);
+      gpu::refresh_surface(true);
       if (g_surface == nullptr) {
         return false;
       }
@@ -234,9 +234,9 @@ void end_frame() noexcept {
   auto imguiDrawData = imgui::freeze();
   gfx::finish();
 
-  const auto& presentSource = webgpu::present_source();
-  const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceWidth,
-                                                           webgpu::g_graphicsConfig.surfaceHeight,
+  const auto& presentSource = gpu::present_source();
+  const auto viewport = gpu::calculate_present_viewport(gpu::g_graphicsConfig.surfaceWidth,
+                                                           gpu::g_graphicsConfig.surfaceHeight,
                                                            presentSource.size.width, presentSource.size.height);
 
   gfx::end_frame([viewport, imguiDrawData = std::move(imguiDrawData)](rhi::CommandList& list) -> uint64_t {
@@ -249,16 +249,16 @@ void end_frame() noexcept {
       }
     }
     if (image != nullptr) {
-      const auto& resampledSource = webgpu::resample_present_source(list, viewport);
-      const auto presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
+      const auto& resampledSource = gpu::resample_present_source(list, viewport);
+      const auto presentBindGroup = gpu::create_copy_bind_group(resampledSource);
       rhi::RenderPassDesc pass;
       pass.color.target = image;
       pass.color.clear = true;
       list.begin_render_pass(pass);
       // Copy EFB -> XFB (swapchain)
-      list.set_pipeline(*webgpu::g_CopyPipeline);
+      list.set_pipeline(*gpu::g_CopyPipeline);
       list.set_bind_group(0, *presentBindGroup, nullptr, 0);
-      set_present_viewport(list, viewport, webgpu::g_graphicsConfig.surfaceWidth, webgpu::g_graphicsConfig.surfaceHeight);
+      set_present_viewport(list, viewport, gpu::g_graphicsConfig.surfaceWidth, gpu::g_graphicsConfig.surfaceHeight);
       list.draw(3, 0);
       list.end_render_pass();
       imgui::render(list, *image, imguiDrawData);

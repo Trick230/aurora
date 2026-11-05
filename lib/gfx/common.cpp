@@ -2,7 +2,7 @@
 
 #include "clear.hpp"
 #include "../internal.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "../gx/pipeline.hpp"
 #include "frame_interp.hpp"
 #include "pipeline_cache.hpp"
@@ -29,7 +29,7 @@
 namespace aurora::gfx {
 static Module Log("aurora::gfx");
 
-using webgpu::g_device;
+using gpu::g_device;
 
 
 constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize +
@@ -184,15 +184,15 @@ static Viewport g_cachedViewport;
 static ClipRect g_cachedScissor;
 
 static void set_efb_targets(RenderPass& pass) {
-  const bool multisampled = webgpu::g_graphicsConfig.msaaSamples > 1;
-  pass.colorTexture = webgpu::g_frameBuffer.texture;
-  pass.resolveTexture = multisampled ? webgpu::g_frameBufferResolved.texture : nullptr;
-  pass.depthTexture = webgpu::g_depthBuffer.texture;
-  pass.copySourceTexture = multisampled ? webgpu::g_frameBufferResolved.texture : webgpu::g_frameBuffer.texture;
-  pass.copySourceView = multisampled ? webgpu::g_frameBufferResolved.view : webgpu::g_frameBuffer.view;
-  pass.copySourceDepthView = webgpu::g_depthBuffer.view;
-  pass.targetSize = {webgpu::g_frameBuffer.size.width, webgpu::g_frameBuffer.size.height, 1};
-  pass.msaaSamples = webgpu::g_graphicsConfig.msaaSamples;
+  const bool multisampled = gpu::g_graphicsConfig.msaaSamples > 1;
+  pass.colorTexture = gpu::g_frameBuffer.texture;
+  pass.resolveTexture = multisampled ? gpu::g_frameBufferResolved.texture : nullptr;
+  pass.depthTexture = gpu::g_depthBuffer.texture;
+  pass.copySourceTexture = multisampled ? gpu::g_frameBufferResolved.texture : gpu::g_frameBuffer.texture;
+  pass.copySourceView = multisampled ? gpu::g_frameBufferResolved.view : gpu::g_frameBuffer.view;
+  pass.copySourceDepthView = gpu::g_depthBuffer.view;
+  pass.targetSize = {gpu::g_frameBuffer.size.width, gpu::g_frameBuffer.size.height, 1};
+  pass.msaaSamples = gpu::g_graphicsConfig.msaaSamples;
 }
 
 static FramePacket& current_frame_packet() {
@@ -887,7 +887,7 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
                               dstSize.height != static_cast<uint32_t>(passInfo.resolveRect.height);
     const bool isDepth = gx::is_depth_format(passInfo.resolveFormat);
     // A plain copy only where the target matches the EFB and keeps its alpha.
-    const bool sameFormat = passInfo.resolveTarget->format == webgpu::g_graphicsConfig.surfaceFormat;
+    const bool sameFormat = passInfo.resolveTarget->format == gpu::g_graphicsConfig.surfaceFormat;
     const tex_copy_conv::ConvRequest convReq{
         .fmt = passInfo.resolveFormat,
         .srcView = isDepth ? passInfo.copySourceDepthView : passInfo.copySourceView,

@@ -6,7 +6,7 @@
 #include "pipeline.hpp"
 
 #include "../gfx/frame_interp.hpp"
-#include "../webgpu/gpu.hpp"
+#include "../gpu/gpu.hpp"
 #include "gx_fmt.hpp"
 #include "shader_info.hpp"
 
@@ -64,8 +64,8 @@ std::shared_ptr<rhi::RenderPipeline> create_pipeline(const PipelineConfig& confi
   const auto dstAlphaMode = dst_alpha_mode(config);
   dump_hlsl(config, dstAlphaMode);
   const auto source = hlsl::build_shader_source(config.shaderConfig, dstAlphaMode);
-  const auto vertex = webgpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
-  const auto fragment = webgpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
+  const auto vertex = gpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
+  const auto fragment = gpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
   return build_pipeline(config, dstAlphaMode, vertex, fragment);
 }
 
