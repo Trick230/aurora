@@ -2,6 +2,7 @@
 
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
+#include "refs.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -18,11 +19,6 @@
 #include <xxhash.h>
 
 namespace aurora {
-#if INTPTR_MAX == INT32_MAX
-using HashType = XXH32_hash_t;
-#else
-using HashType = XXH64_hash_t;
-#endif
 static inline HashType xxh3_hash_s(const void* input, size_t len, HashType seed = 0) {
   return static_cast<HashType>(XXH3_64bits_withSeed(input, len, seed));
 }
@@ -210,18 +206,6 @@ extern wgpu::BindGroupLayout g_staticBindGroupLayout;
 extern wgpu::BindGroup g_staticBindGroup;
 extern wgpu::BindGroupLayout g_uniformBindGroupLayout;
 extern wgpu::BindGroup g_uniformBindGroup;
-
-using BindGroupRef = HashType;
-using PipelineRef = HashType;
-using SamplerRef = HashType;
-using ShaderRef = HashType;
-struct Range {
-  uint32_t offset = 0;
-  uint32_t size = 0;
-
-  bool operator==(const Range& rhs) const { return memcmp(this, &rhs, sizeof(*this)) == 0; }
-  bool operator!=(const Range& rhs) const { return !(*this == rhs); }
-};
 
 struct ClipRect {
   int32_t x;

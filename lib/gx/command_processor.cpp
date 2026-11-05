@@ -1891,26 +1891,26 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices, const std::array<u32, GX_VA_MAX_ATTR>& arraySizes);
 
-static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size, bool bigEndian) {
-  u32 vtxSize;
+static u32 vertex_size(GXVtxFmt fmt) {
   if (g_gxState.lastVtxFmt == fmt)
-    LIKELY { vtxSize = g_gxState.lastVtxSize; }
+    LIKELY { return g_gxState.lastVtxSize; }
   else
-    UNLIKELY { vtxSize = calculate_last_vtx_size(fmt); }
+    UNLIKELY { return calculate_last_vtx_size(fmt); }
+}
 
-  u32 totalVtxBytes = vtxCount * vtxSize;
-  if (pos + totalVtxBytes > size)
-    UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
+// The draw's vertices, wherever they came from, with the state in g_gxState.
+static void draw_vertices(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* vertices, u32 vtxSize, bool bigEndian) {
+  const u32 totalVtxBytes = vtxCount * vtxSize;
 
   std::array<u32, GX_VA_MAX_ATTR> arraySizes;
-  calculate_indexed_array_sizes(vtxCount, data + pos, bigEndian, arraySizes);
+  calculate_indexed_array_sizes(vtxCount, vertices, bigEndian, arraySizes);
   if (gfx::interp::enabled()) {
     // A vertex's matrix index, when it has one, is its first byte: the
     // matrix's row in XF memory.
     s_vtxMatrices = 0;
     if (g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_NONE) {
       for (u32 v = 0; v < vtxCount; ++v) {
-        s_vtxMatrices |= 1u << std::min<u32>(data[pos + v * vtxSize] / 3, MaxPnMtx - 1);
+        s_vtxMatrices |= 1u << std::min<u32>(vertices[v * vtxSize] / 3, MaxPnMtx - 1);
       }
     }
   }
@@ -1950,13 +1950,11 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
                  totalVtxBytes, idxVerts * 3 * sizeof(u16), storageBytes);
       }
       ++gfx::g_droppedDrawCallCount;
-      pos += totalVtxBytes;
       return;
     }
 
   // Push raw vertex data to buffer. Merged draws must remain byte-contiguous with the previous range.
-  gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, canMerge ? 0 : 4);
-  pos += totalVtxBytes;
+  gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes, canMerge ? 0 : 4);
 
   // Try to merge with previous draw call
   if (canMerge) {
@@ -1999,6 +1997,16 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   }
 
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange, arraySizes);
+}
+
+static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size, bool bigEndian) {
+  const u32 vtxSize = vertex_size(fmt);
+  const u32 totalVtxBytes = vtxCount * vtxSize;
+  if (pos + totalVtxBytes > size)
+    UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
+  const u8* vertices = data + pos;
+  pos += totalVtxBytes;
+  draw_vertices(prim, fmt, vtxCount, vertices, vtxSize, bigEndian);
 }
 
 static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
@@ -2191,6 +2199,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
 }
 
 } // namespace aurora::gx::fifo
+
+void aurora::gx::submit_draw(const VertexPacket& packet) {
+  fifo::draw_vertices(packet.prim, packet.fmt, packet.vtxCount, packet.vertices, fifo::vertex_size(packet.fmt),
+                      packet.bigEndian);
+}
 
 namespace aurora::gx::recomp {
 namespace {

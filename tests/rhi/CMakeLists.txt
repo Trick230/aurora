@@ -7,6 +7,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/AuroraRhi.cmake")
 
 add_executable(test_rhi test_rhi.cpp)
 target_link_libraries(test_rhi PRIVATE aurora_rhi)
+target_include_directories(test_rhi PRIVATE ../../include)
 if (MINGW)
     target_link_options(test_rhi PRIVATE -static)
 endif ()

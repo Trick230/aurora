@@ -4,20 +4,6 @@
 #include "gx.hpp"
 
 namespace aurora::gx {
-struct DrawData {
-  gfx::PipelineRef pipeline;
-  gfx::Range vertRange;
-  gfx::Range idxRange;
-  gfx::Range uniformRange;
-  uint32_t vtxCount;
-  uint32_t indexCount;
-  uint32_t instanceCount;
-  uint32_t firstInstance; // vertex byte offset for single-instance draws (vtx_start)
-  GXBindGroups bindGroups;
-  uint32_t dstAlpha;
-  GXCullMode cullMode;
-};
-
 constexpr uint32_t GXPipelineConfigVersion = 18;
 struct PipelineConfig {
   uint32_t version = GXPipelineConfigVersion;

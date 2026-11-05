@@ -1,6 +1,7 @@
 // Runs the same work on every backend and compares the pixels, headless: the same
 // bytes on both, or close to it where the APIs leave rounding to the driver.
 #include "rhi.hpp"
+#include "../../lib/gx/draw_packet.hpp" // compiles with no graphics API in sight
 
 #include <algorithm>
 #include <cstdint>

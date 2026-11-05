@@ -4,6 +4,7 @@
 
 #include "../internal.hpp"
 #include "../gfx/common.hpp"
+#include "draw_packet.hpp"
 #include "../gfx/frame_interp.hpp"
 #include "../gfx/texture.hpp"
 
@@ -525,9 +526,6 @@ static_assert(std::has_unique_object_representations_v<ShaderConfig>);
 
 struct PipelineConfig;
 
-struct GXBindGroups {
-  gfx::BindGroupRef textureBindGroup;
-};
 // Output info from shader generation
 struct ShaderInfo {
   std::bitset<MaxTexCoord> sampledTexCoords;
