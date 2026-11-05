@@ -231,6 +231,7 @@ public:
   D3D12Texture* pass_resolve = nullptr;
   D3D12Texture* pass_depth = nullptr;
 
+  ~D3D12CommandList() override;
   void begin() override;
   void end() override { list->Close(); }
 
@@ -403,7 +404,7 @@ public:
   DescriptorHeap rtv_heap, dsv_heap, srv_heap, sampler_heap;
   // Tables of samplers are few and shared: the heap holds only 2048 samplers.
   std::map<std::vector<std::array<uint32_t, 16>>, UINT> sampler_tables;
-  std::deque<std::pair<UINT64, std::function<void()>>> retired;
+  RetireQueue retired;
   std::mutex mutex;
   std::string name;
   DeviceFeatures device_features;
@@ -421,16 +422,9 @@ public:
 
   void retire(std::function<void()> release) {
     std::lock_guard lock{mutex};
-    retired.emplace_back(fence_value + 1, std::move(release));
+    retired.retire(fence_value + 1, std::move(release));
   }
-  void collect() {
-    const UINT64 done = fence ? fence->GetCompletedValue() : 0;
-    std::lock_guard lock{mutex};
-    while (!retired.empty() && retired.front().first <= done) {
-      retired.front().second();
-      retired.pop_front();
-    }
-  }
+  void collect() { retired.collect(fence ? fence->GetCompletedValue() : 0); }
   void drain_messages() {
     if (!info_queue)
       return;
@@ -763,6 +757,7 @@ public:
     queue->ExecuteCommandLists(1, lists);
     const UINT64 ticket = ++fence_value;
     queue->Signal(fence.Get(), ticket);
+    retired.submitted(&list, ticket);
     collect();
     drain_messages();
     return ticket;
@@ -842,7 +837,10 @@ D3D12BindGroup::~D3D12BindGroup() {
   }
 }
 
+D3D12CommandList::~D3D12CommandList() { owner->retired.closed(this); }
+
 void D3D12CommandList::begin() {
+  owner->retired.opened(this);
   allocator->Reset();
   list->Reset(allocator.Get(), nullptr);
   ID3D12DescriptorHeap* heaps[] = {owner->srv_heap.heap.Get(), owner->sampler_heap.heap.Get()};

@@ -228,9 +228,11 @@ public:
   VulkanTexture* pass_resolve = nullptr;
   VulkanTexture* pass_depth = nullptr;
 
-  ~VulkanCommandList() override { vkDestroyCommandPool(device, pool, nullptr); }
+  ~VulkanCommandList() override;
+  void opened();
 
   void begin() override {
+    opened();
     vkResetCommandPool(device, pool, 0);
     VkCommandBufferBeginInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -451,7 +453,7 @@ public:
   uint32_t queue_family = 0;
   std::string name;
   DeviceFeatures device_features;
-  std::deque<std::pair<uint64_t, std::function<void()>>> retired;
+  RetireQueue retired;
   std::vector<VkDescriptorPool> pools;
   std::mutex mutex;
   float max_anisotropy = 16.0f;
@@ -480,16 +482,12 @@ public:
 
   void retire(std::function<void()> release) {
     std::lock_guard lock{mutex};
-    retired.emplace_back(timeline_value + 1, std::move(release));
+    retired.retire(timeline_value + 1, std::move(release));
   }
   void collect(bool everything = false) {
     uint64_t done = 0;
     vkGetSemaphoreCounterValue(device, timeline, &done);
-    std::lock_guard lock{mutex};
-    while (!retired.empty() && (everything || retired.front().first <= done)) {
-      retired.front().second();
-      retired.pop_front();
-    }
+    retired.collect(done, everything);
   }
 
   std::unique_ptr<Buffer> create_buffer(const BufferDesc& desc) override {
@@ -856,7 +854,7 @@ public:
   std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
 
   uint64_t submit(CommandList& list) override {
-    queue_submit(static_cast<VulkanCommandList&>(list).list, VK_NULL_HANDLE);
+    queue_submit(static_cast<VulkanCommandList&>(list).list, VK_NULL_HANDLE, &list);
     return timeline_value;
   }
 
@@ -877,7 +875,7 @@ public:
   // Everything goes through here: new textures' layouts first, and a wait for the
   // image of a swapchain if one was just acquired. A signal for a present comes
   // after all that was submitted before, in the same batch or not.
-  void queue_submit(VkCommandBuffer list, VkSemaphore present_signal) {
+  void queue_submit(VkCommandBuffer list, VkSemaphore present_signal, const void* submitted = nullptr) {
     VkCommandBuffer buffers[2];
     uint32_t buffer_count = 0;
     {
@@ -885,7 +883,7 @@ public:
       if (init_list) {
         vkEndCommandBuffer(init_list);
         buffers[buffer_count++] = init_list;
-        retired.emplace_back(timeline_value + 1, [device = device, pool = init_pool] {
+        retired.retire(timeline_value + 1, [device = device, pool = init_pool] {
           vkDestroyCommandPool(device, pool, nullptr);
         });
         init_list = VK_NULL_HANDLE;
@@ -919,6 +917,8 @@ public:
     }
     vkQueueSubmit(queue, 1, &info, VK_NULL_HANDLE);
     pending_acquire = VK_NULL_HANDLE;
+    if (submitted)
+      retired.submitted(submitted, value);
     collect();
   }
 
@@ -927,6 +927,13 @@ public:
     collect();
   }
 };
+
+VulkanCommandList::~VulkanCommandList() {
+  owner->retired.closed(this);
+  vkDestroyCommandPool(device, pool, nullptr);
+}
+
+void VulkanCommandList::opened() { owner->retired.opened(this); }
 
 VulkanBuffer::~VulkanBuffer() {
   owner->retire([allocator = owner->allocator, buffer = buffer, allocation = allocation] {

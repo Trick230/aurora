@@ -513,6 +513,27 @@ int test_compressed_mips(Device& device) {
   return failures;
 }
 
+// A buffer destroyed while a list that copies from it is still open, with
+// another list submitted and finished meanwhile: it has to outlive the first.
+// Only validation tells.
+void test_retire_while_open(Device& device) {
+  auto source = must(device.create_buffer({256, MemoryKind::Upload}), "source");
+  auto target = must(device.create_buffer({256, MemoryKind::Readback}), "target");
+  auto open = must(device.create_command_list(), "open list");
+  auto other = must(device.create_command_list(), "other list");
+  open->begin();
+  open->copy_buffer(*source, 0, *target, 0, 256);
+  source.reset();
+  other->begin();
+  other->end();
+  device.wait(device.submit(*other));
+  other->begin();
+  other->end();
+  device.wait(device.submit(*other));
+  open->end();
+  device.wait(device.submit(*open));
+}
+
 int test_swapchain(Device& device) {
   WNDCLASSA window_class{};
   window_class.lpfnWndProc = DefWindowProcA;
@@ -609,6 +630,7 @@ int main() {
     const int bc_failures = test_compressed_mips(*device);
     std::printf("%s: compressed mips %s\n", backends[i].name, bc_failures ? "failed" : "ok");
     failures += bc_failures;
+    test_retire_while_open(*device);
 #ifdef _WIN32
     const int swapchain_failures = test_swapchain(*device);
     std::printf("%s: swapchain %s\n", backends[i].name, swapchain_failures ? "failed" : "ok");
