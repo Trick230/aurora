@@ -7,6 +7,10 @@
 // buffer readable by everything; a pass or a copy takes it from there and puts it
 // back, so nothing needs a barrier inside a render pass. Commands must be
 // submitted in the order they were recorded.
+//
+// Whatever goes away stays alive until the GPU has finished with what was already
+// submitted. Views and bind groups don't keep their texture or buffer alive,
+// though: those have to outlast them.
 
 #include <cstdint>
 #include <memory>
@@ -286,6 +290,36 @@ public:
                             uint32_t destination_x, uint32_t destination_y) = 0;
 };
 
+enum class PresentMode {
+  Fifo,      // waits for the display's refresh
+  Mailbox,   // the latest finished frame goes out at the refresh; others are dropped
+  Immediate, // right away, tearing; where the system can't, as Mailbox or Fifo
+};
+
+struct NativeWindow {
+  void* instance = nullptr; // HINSTANCE
+  void* window = nullptr;   // HWND
+};
+
+struct SwapchainDesc {
+  NativeWindow window;
+  uint32_t width = 0, height = 0; // the client area's: Vulkan gives no other
+  Format format = Format::BGRA8Unorm; // BGRA8Unorm or RGBA8Unorm
+  PresentMode mode = PresentMode::Fifo;
+};
+
+class Swapchain {
+public:
+  virtual ~Swapchain() = default;
+  // The texture to draw this frame in, a color target and a copy's source or
+  // destination, not sampled; submit what draws in it and then present. nullptr if
+  // the window changed and resize has to come first.
+  virtual Texture* acquire() = 0;
+  virtual void present() = 0;
+  // Waits for the GPU. Not between acquire and present.
+  virtual void resize(uint32_t width, uint32_t height) = 0;
+};
+
 struct DeviceFeatures {
   uint32_t max_samples = 1; // the most both color and depth targets can have
   uint32_t uniform_offset_alignment = 256;
@@ -305,6 +339,7 @@ public:
   virtual std::unique_ptr<PipelineLayout> create_pipeline_layout(const PipelineLayoutDesc& desc) = 0;
   virtual std::unique_ptr<RenderPipeline> create_render_pipeline(const RenderPipelineDesc& desc) = 0;
   virtual std::unique_ptr<CommandList> create_command_list() = 0;
+  virtual std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) = 0;
   virtual void submit(CommandList& list) = 0;
   virtual void wait_idle() = 0;
 };

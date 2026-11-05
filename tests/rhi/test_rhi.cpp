@@ -9,6 +9,10 @@
 #include <cstring>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 using namespace aurora::rhi;
 
 namespace {
@@ -378,6 +382,73 @@ std::vector<Pixels> render(Device& device) {
   return results;
 }
 
+#ifdef _WIN32
+// Frames through a real swapchain, in a window never shown, in every present mode
+// and across a resize: each frame's color has to reach the image that was acquired.
+int test_swapchain(Device& device) {
+  WNDCLASSA window_class{};
+  window_class.lpfnWndProc = DefWindowProcA;
+  window_class.hInstance = GetModuleHandleA(nullptr);
+  window_class.lpszClassName = "aurora_rhi_test";
+  RegisterClassA(&window_class);
+  const HWND window = CreateWindowExA(0, window_class.lpszClassName, "rhi", WS_POPUP, 0, 0, 64, 48, nullptr,
+                                      nullptr, window_class.hInstance, nullptr);
+  int failures = 0;
+  auto readback = must(device.create_buffer({uint64_t{BytesPerRow} * 256, MemoryKind::Readback}), "readback");
+  auto list = must(device.create_command_list(), "command list");
+  uint32_t frame = 0;
+  for (PresentMode mode : {PresentMode::Fifo, PresentMode::Mailbox, PresentMode::Immediate}) {
+    SetWindowPos(window, nullptr, 0, 0, 64, 48, SWP_NOMOVE | SWP_NOZORDER);
+    SwapchainDesc desc;
+    desc.window = {window_class.hInstance, window};
+    desc.width = 64;
+    desc.height = 48;
+    desc.mode = mode;
+    auto swapchain = device.create_swapchain(desc);
+    if (!swapchain) {
+      std::printf("no swapchain\n");
+      ++failures;
+      continue;
+    }
+    for (uint32_t i = 0; i < 16; ++i) {
+      if (i == 8) {
+        SetWindowPos(window, nullptr, 0, 0, 96, 80, SWP_NOMOVE | SWP_NOZORDER);
+        swapchain->resize(96, 80);
+      }
+      Texture* image = swapchain->acquire();
+      if (!image) {
+        std::printf("acquire failed at frame %u\n", i);
+        ++failures;
+        break;
+      }
+      const float red = float(++frame % 200 + 20);
+      list->begin();
+      RenderPassDesc pass;
+      pass.color.target = image;
+      pass.color.clear = true;
+      pass.color.clear_color = {red / 255.0f, 0.25f, 0.4f, 1.0f};
+      list->begin_render_pass(pass);
+      list->end_render_pass();
+      list->copy_texture_to_buffer(*image, {}, *readback, 0, BytesPerRow);
+      list->end();
+      device.submit(*list);
+      swapchain->present();
+      device.wait_idle();
+      // BGRA, in the last pixel of the frame's size.
+      const uint32_t width = i < 8 ? 64 : 96, height = i < 8 ? 48 : 80;
+      const auto* pixel = static_cast<const uint8_t*>(readback->mapped()) + size_t{height - 1} * BytesPerRow + (width - 1) * 4;
+      if (pixel[2] != uint8_t(red) || pixel[1] != 64 || pixel[0] != 102) {
+        std::printf("frame %u: got %u %u %u, wanted %u 64 102\n", i, pixel[2], pixel[1], pixel[0], uint8_t(red));
+        ++failures;
+      }
+    }
+  }
+  DestroyWindow(window);
+  UnregisterClassA(window_class.lpszClassName, window_class.hInstance);
+  return failures;
+}
+#endif
+
 } // namespace
 
 int main() {
@@ -389,6 +460,7 @@ int main() {
   } backends[] = {{Backend::D3D12, "D3D12"}, {Backend::Vulkan, "Vulkan"}};
   DeviceOptions options;
   options.validation = std::getenv("RHI_VALIDATION") != nullptr;
+  int64_t provoked = 0;
   for (int i = 0; i < 2; ++i) {
     std::string error;
     auto device = create_device(backends[i].backend, options, &error);
@@ -405,6 +477,32 @@ int main() {
     }
     results[i] = render(*device);
     device->wait_idle();
+#ifdef _WIN32
+    const int swapchain_failures = test_swapchain(*device);
+    std::printf("%s: swapchain %s\n", backends[i].name, swapchain_failures ? "failed" : "ok");
+    failures += swapchain_failures;
+#endif
+    if (options.validation) {
+      // Zero messages mean something only if this one is caught: a draw with no
+      // pipeline, recorded and never submitted.
+      const int64_t before = validation_errors();
+      auto target = must(device->create_texture({4, 4, 1, 1, Format::RGBA8Unorm, TextureColorTarget}), "target");
+      auto list = must(device->create_command_list(), "command list");
+      list->begin();
+      RenderPassDesc pass;
+      pass.color.target = target.get();
+      list->begin_render_pass(pass);
+      list->draw(3, 0);
+      list->end_render_pass();
+      list->end();
+      device->wait_idle();
+      const int64_t caught = validation_errors() - before;
+      std::printf("%s: the layer caught the bad draw with %lld messages\n", backends[i].name,
+                  static_cast<long long>(caught));
+      if (before < 0 || caught <= 0)
+        ++failures;
+      provoked += caught;
+    }
   }
   if (results[0].size() != results[1].size() || results[0].empty()) {
     std::printf("no results to compare\n");
@@ -440,7 +538,7 @@ int main() {
     if (worst > 1 || sum / a.size() < 8 || quad_delta > 2.0)
       ++failures;
   }
-  const int64_t messages = validation_errors();
+  const int64_t messages = validation_errors() - provoked;
   std::printf("validation: %s, %lld messages\n", messages < 0 ? "not active" : "active",
               static_cast<long long>(messages < 0 ? 0 : messages));
   if (messages > 0)

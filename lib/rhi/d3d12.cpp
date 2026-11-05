@@ -1,5 +1,6 @@
 #include "rhi_internal.hpp"
 
+#include <D3D12MemAlloc.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
@@ -144,7 +145,8 @@ public:
 class D3D12Buffer final : public Buffer {
 public:
   D3D12Device* owner = nullptr;
-  ComPtr<ID3D12Resource> resource;
+  ComPtr<D3D12MA::Allocation> allocation;
+  ID3D12Resource* resource = nullptr;
   D3D12_GPU_VIRTUAL_ADDRESS address = 0;
   uint64_t size = 0;
   void* pointer = nullptr;
@@ -156,6 +158,7 @@ public:
 class D3D12Texture final : public Texture {
 public:
   D3D12Device* owner = nullptr;
+  ComPtr<D3D12MA::Allocation> allocation; // none for a swapchain's
   ComPtr<ID3D12Resource> resource;
   UINT rtv = UINT_MAX, dsv = UINT_MAX;
   D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
@@ -302,16 +305,16 @@ public:
   void copy_buffer(Buffer& source, uint64_t source_offset, Buffer& destination, uint64_t destination_offset,
                    uint64_t size) override {
     auto& to = static_cast<D3D12Buffer&>(destination);
-    transition(to.resource.Get(), to.rest, D3D12_RESOURCE_STATE_COPY_DEST);
-    list->CopyBufferRegion(to.resource.Get(), destination_offset, static_cast<D3D12Buffer&>(source).resource.Get(),
-                           source_offset, size);
-    transition(to.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, to.rest);
+    transition(to.resource, to.rest, D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyBufferRegion(to.resource, destination_offset, static_cast<D3D12Buffer&>(source).resource, source_offset,
+                           size);
+    transition(to.resource, D3D12_RESOURCE_STATE_COPY_DEST, to.rest);
   }
 
   static D3D12_TEXTURE_COPY_LOCATION footprint(D3D12Buffer& buffer, const D3D12Texture& texture, uint64_t offset,
                                                uint32_t bytes_per_row, uint32_t width, uint32_t height) {
     D3D12_TEXTURE_COPY_LOCATION location{};
-    location.pResource = buffer.resource.Get();
+    location.pResource = buffer.resource;
     location.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     location.PlacedFootprint.Offset = offset;
     location.PlacedFootprint.Footprint.Format = texture.copy_format;
@@ -348,12 +351,12 @@ public:
     const uint32_t height = region.height ? region.height : MipExtent(texture.height, region.mip);
     auto& buffer = static_cast<D3D12Buffer&>(destination);
     transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    transition(buffer.resource.Get(), buffer.rest, D3D12_RESOURCE_STATE_COPY_DEST);
+    transition(buffer.resource, buffer.rest, D3D12_RESOURCE_STATE_COPY_DEST);
     const auto from = subresource(texture, region.mip);
     const auto to = footprint(buffer, texture, offset, bytes_per_row, width, height);
     const D3D12_BOX box{region.x, region.y, 0, region.x + width, region.y + height, 1};
     list->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
-    transition(buffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, buffer.rest);
+    transition(buffer.resource, D3D12_RESOURCE_STATE_COPY_DEST, buffer.rest);
     transition(texture, texture.rest);
   }
 
@@ -376,7 +379,9 @@ public:
 
 class D3D12Device final : public Device {
 public:
+  ComPtr<IDXGIFactory6> factory;
   ComPtr<ID3D12Device> device;
+  ComPtr<D3D12MA::Allocator> allocator;
   ComPtr<ID3D12CommandQueue> queue;
   ComPtr<ID3D12Fence> fence;
   ComPtr<ID3D12InfoQueue> info_queue;
@@ -431,10 +436,10 @@ public:
   }
 
   std::unique_ptr<Buffer> create_buffer(const BufferDesc& desc) override {
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = desc.memory == MemoryKind::Upload     ? D3D12_HEAP_TYPE_UPLOAD
-                : desc.memory == MemoryKind::Readback ? D3D12_HEAP_TYPE_READBACK
-                                                      : D3D12_HEAP_TYPE_DEFAULT;
+    D3D12MA::ALLOCATION_DESC heap{};
+    heap.HeapType = desc.memory == MemoryKind::Upload     ? D3D12_HEAP_TYPE_UPLOAD
+                    : desc.memory == MemoryKind::Readback ? D3D12_HEAP_TYPE_READBACK
+                                                          : D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC info{};
     info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     info.Width = desc.size;
@@ -448,9 +453,9 @@ public:
     buffer->size = desc.size;
     buffer->rest = desc.memory == MemoryKind::Readback ? D3D12_RESOURCE_STATE_COPY_DEST
                                                        : D3D12_RESOURCE_STATE_GENERIC_READ;
-    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &info, buffer->rest, nullptr,
-                                               IID_PPV_ARGS(&buffer->resource))))
+    if (FAILED(allocator->CreateResource(&heap, &info, buffer->rest, nullptr, &buffer->allocation, IID_NULL, nullptr)))
       return nullptr;
+    buffer->resource = buffer->allocation->GetResource();
     buffer->address = buffer->resource->GetGPUVirtualAddress();
     if (desc.memory != MemoryKind::Device && FAILED(buffer->resource->Map(0, nullptr, &buffer->pointer)))
       return nullptr;
@@ -458,8 +463,8 @@ public:
   }
 
   std::unique_ptr<Texture> create_texture(const TextureDesc& desc) override {
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12MA::ALLOCATION_DESC heap{};
+    heap.HeapType = D3D12_HEAP_TYPE_DEFAULT;
     const bool depth = desc.format == Format::Depth32Float;
     D3D12_RESOURCE_DESC info{};
     info.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -486,9 +491,9 @@ public:
                     : depth                       ? D3D12_RESOURCE_STATE_DEPTH_WRITE
                                                   : D3D12_RESOURCE_STATE_RENDER_TARGET;
     texture->state = texture->rest;
-    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &info, texture->state, nullptr,
-                                               IID_PPV_ARGS(&texture->resource))))
+    if (FAILED(allocator->CreateResource(&heap, &info, texture->state, nullptr, &texture->allocation, IID_NULL, nullptr)))
       return nullptr;
+    texture->resource = texture->allocation->GetResource();
     std::lock_guard lock{mutex};
     if (desc.usage & TextureColorTarget) {
       texture->rtv = rtv_heap.allocate(1);
@@ -578,7 +583,7 @@ public:
           const auto& buffer = *static_cast<D3D12Buffer*>(value->buffer);
           view.Buffer.NumElements = static_cast<UINT>((value->size ? value->size : buffer.size - value->offset) / 4);
           view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-          device->CreateShaderResourceView(buffer.resource.Get(), &view, handle);
+          device->CreateShaderResourceView(buffer.resource, &view, handle);
         }
       }
     }
@@ -709,6 +714,8 @@ public:
     return pipeline;
   }
 
+  std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
+
   std::unique_ptr<CommandList> create_command_list() override {
     auto list = std::make_unique<D3D12CommandList>();
     list->owner = this;
@@ -743,11 +750,12 @@ public:
 };
 
 D3D12Buffer::~D3D12Buffer() {
-  owner->retire([resource = std::move(resource)] {});
+  owner->retire([allocation = std::move(allocation)] {});
 }
 
 D3D12Texture::~D3D12Texture() {
-  owner->retire([resource = std::move(resource), device = owner, rtv = rtv, dsv = dsv] {
+  owner->retire([allocation = std::move(allocation), resource = std::move(resource), device = owner, rtv = rtv,
+                 dsv = dsv] {
     if (rtv != UINT_MAX)
       device->rtv_heap.release(rtv, 1);
     if (dsv != UINT_MAX)
@@ -846,22 +854,121 @@ void D3D12CommandList::end_render_pass() {
   pass_color = pass_resolve = pass_depth = nullptr;
 }
 
+class D3D12Swapchain final : public Swapchain {
+public:
+  D3D12Device* owner = nullptr;
+  ComPtr<IDXGISwapChain3> swapchain;
+  HANDLE waitable = nullptr;
+  std::vector<std::unique_ptr<D3D12Texture>> images;
+  UINT flags = 0;
+  UINT present_interval = 1, present_flags = 0;
+  uint32_t width = 0, height = 0;
+  bool waited = false;
+
+  ~D3D12Swapchain() override {
+    release_images();
+    if (waitable)
+      CloseHandle(waitable);
+  }
+
+  void release_images() {
+    images.clear();
+    // The swapchain's buffers have to be gone, not just retired, to resize.
+    owner->wait_idle();
+  }
+
+  bool build_images() {
+    DXGI_SWAP_CHAIN_DESC1 info{};
+    if (FAILED(swapchain->GetDesc1(&info)))
+      return false;
+    for (UINT i = 0; i < info.BufferCount; ++i) {
+      auto image = std::make_unique<D3D12Texture>();
+      image->owner = owner;
+      if (FAILED(swapchain->GetBuffer(i, IID_PPV_ARGS(&image->resource))))
+        return false;
+      image->state = image->rest = D3D12_RESOURCE_STATE_PRESENT;
+      image->copy_format = info.Format;
+      image->width = info.Width;
+      image->height = info.Height;
+      std::lock_guard lock{owner->mutex};
+      image->rtv = owner->rtv_heap.allocate(1);
+      if (image->rtv == UINT_MAX)
+        return false;
+      owner->device->CreateRenderTargetView(image->resource.Get(), nullptr, owner->rtv_heap.cpu(image->rtv));
+      images.push_back(std::move(image));
+    }
+    return true;
+  }
+
+  Texture* acquire() override {
+    WaitForSingleObjectEx(waitable, 1000, TRUE);
+    return images[swapchain->GetCurrentBackBufferIndex()].get();
+  }
+
+  void present() override { swapchain->Present(present_interval, present_flags); }
+
+  void resize(uint32_t new_width, uint32_t new_height) override {
+    release_images();
+    swapchain->ResizeBuffers(0, new_width, new_height, DXGI_FORMAT_UNKNOWN, flags);
+    build_images();
+  }
+};
+
+std::unique_ptr<Swapchain> D3D12Device::create_swapchain(const SwapchainDesc& desc) {
+  auto result = std::make_unique<D3D12Swapchain>();
+  result->owner = this;
+  BOOL tearing = FALSE;
+  if (FAILED(factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof(tearing))))
+    tearing = FALSE;
+  result->flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+  if (tearing)
+    result->flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+  if (desc.mode != PresentMode::Fifo)
+    result->present_interval = 0;
+  if (desc.mode == PresentMode::Immediate && tearing)
+    result->present_flags = DXGI_PRESENT_ALLOW_TEARING;
+  DXGI_SWAP_CHAIN_DESC1 info{};
+  info.Width = desc.width;
+  info.Height = desc.height;
+  info.Format = to_dxgi(desc.format);
+  info.SampleDesc.Count = 1;
+  info.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+  info.BufferCount = 3;
+  info.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+  info.Flags = result->flags;
+  const HWND window = static_cast<HWND>(desc.window.window);
+  ComPtr<IDXGISwapChain1> created;
+  if (FAILED(factory->CreateSwapChainForHwnd(queue.Get(), window, &info, nullptr, nullptr, &created)) ||
+      FAILED(created.As(&result->swapchain)))
+    return nullptr;
+  // The window's owner decides about fullscreen.
+  factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
+  result->swapchain->SetMaximumFrameLatency(2);
+  result->waitable = result->swapchain->GetFrameLatencyWaitableObject();
+  if (!result->build_images())
+    return nullptr;
+  return result;
+}
+
 } // namespace
 
 std::unique_ptr<Device> create_d3d12_device(const DeviceOptions& options, std::string* error) {
   if (options.validation) {
     ComPtr<ID3D12Debug> debug;
-    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+    const HRESULT result = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
+    if (SUCCEEDED(result)) {
       debug->EnableDebugLayer();
       validation_active();
+    } else {
+      std::fprintf(stderr, "D3D12: no debug layer (0x%08lx)\n", static_cast<unsigned long>(result));
     }
   }
-  ComPtr<IDXGIFactory6> factory;
-  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+  auto result = std::make_unique<D3D12Device>();
+  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&result->factory)))) {
     *error = "no DXGI 1.6 factory";
     return nullptr;
   }
-  auto result = std::make_unique<D3D12Device>();
+  auto& factory = result->factory;
   ComPtr<IDXGIAdapter1> adapter;
   for (UINT i = 0;
        factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) !=
@@ -884,6 +991,13 @@ std::unique_ptr<Device> create_d3d12_device(const DeviceOptions& options, std::s
   }
   if (options.validation)
     result->device.As(&result->info_queue);
+  D3D12MA::ALLOCATOR_DESC allocator{};
+  allocator.pDevice = result->device.Get();
+  allocator.pAdapter = adapter.Get();
+  if (FAILED(D3D12MA::CreateAllocator(&allocator, &result->allocator))) {
+    *error = "could not create the memory allocator";
+    return nullptr;
+  }
   D3D12_COMMAND_QUEUE_DESC queue{};
   queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   auto* device = result->device.Get();

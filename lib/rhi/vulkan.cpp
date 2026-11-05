@@ -434,6 +434,10 @@ public:
   // Takes new textures to the layout they rest in, ahead of the next submit.
   VkCommandPool init_pool = VK_NULL_HANDLE;
   VkCommandBuffer init_list = VK_NULL_HANDLE;
+  // The image a swapchain handed out, until a submit waits for it.
+  VkSemaphore pending_acquire = VK_NULL_HANDLE;
+  uint64_t* pending_acquire_done = nullptr;
+  bool can_present = false;
   uint64_t timeline_value = 0;
   uint32_t queue_family = 0;
   std::string name;
@@ -832,7 +836,16 @@ public:
     return true;
   }
 
+  std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
+
   void submit(CommandList& list) override {
+    queue_submit(static_cast<VulkanCommandList&>(list).list, VK_NULL_HANDLE);
+  }
+
+  // Everything goes through here: new textures' layouts first, and a wait for the
+  // image of a swapchain if one was just acquired. A signal for a present comes
+  // after all that was submitted before, in the same batch or not.
+  void queue_submit(VkCommandBuffer list, VkSemaphore present_signal) {
     VkCommandBuffer buffers[2];
     uint32_t buffer_count = 0;
     {
@@ -847,18 +860,33 @@ public:
         init_pool = VK_NULL_HANDLE;
       }
     }
-    buffers[buffer_count++] = static_cast<VulkanCommandList&>(list).list;
+    if (list)
+      buffers[buffer_count++] = list;
     const uint64_t value = ++timeline_value;
+    const uint64_t signal_values[2] = {value, 0};
+    const VkSemaphore signals[2] = {timeline, present_signal};
+    const uint64_t wait_value = 0;
+    const VkPipelineStageFlags wait_stage =
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkTimelineSemaphoreSubmitInfo timeline_info{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
-    timeline_info.signalSemaphoreValueCount = 1;
-    timeline_info.pSignalSemaphoreValues = &value;
+    timeline_info.signalSemaphoreValueCount = present_signal ? 2 : 1;
+    timeline_info.pSignalSemaphoreValues = signal_values;
     VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     info.pNext = &timeline_info;
     info.commandBufferCount = buffer_count;
     info.pCommandBuffers = buffers;
-    info.signalSemaphoreCount = 1;
-    info.pSignalSemaphores = &timeline;
+    info.signalSemaphoreCount = present_signal ? 2 : 1;
+    info.pSignalSemaphores = signals;
+    if (pending_acquire) {
+      info.waitSemaphoreCount = 1;
+      info.pWaitSemaphores = &pending_acquire;
+      info.pWaitDstStageMask = &wait_stage;
+      timeline_info.waitSemaphoreValueCount = 1;
+      timeline_info.pWaitSemaphoreValues = &wait_value;
+      *pending_acquire_done = value;
+    }
     vkQueueSubmit(queue, 1, &info, VK_NULL_HANDLE);
+    pending_acquire = VK_NULL_HANDLE;
     collect();
   }
 
@@ -879,7 +907,8 @@ VulkanTexture::~VulkanTexture() {
                  allocation = allocation] {
     if (view)
       vkDestroyImageView(device, view, nullptr);
-    vmaDestroyImage(allocator, image, allocation);
+    if (allocation)
+      vmaDestroyImage(allocator, image, allocation);
   });
 }
 
@@ -916,6 +945,173 @@ VulkanRenderPipeline::~VulkanRenderPipeline() {
   owner->retire([device = owner->device, pipeline = pipeline] { vkDestroyPipeline(device, pipeline, nullptr); });
 }
 
+class VulkanSwapchain final : public Swapchain {
+public:
+  VulkanDevice* owner = nullptr;
+  VkSurfaceKHR surface = VK_NULL_HANDLE;
+  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+  VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
+  Format format = Format::BGRA8Unorm;
+  std::vector<std::unique_ptr<VulkanTexture>> images;
+  // One semaphore per image each way: an acquire's can be used again once the
+  // submit that waited for it is done, and a present's once its image comes back.
+  std::vector<VkSemaphore> acquire_semaphores, present_semaphores;
+  std::vector<uint64_t> acquire_done;
+  uint32_t next_slot = 0, current = 0;
+
+  ~VulkanSwapchain() override {
+    owner->wait_idle();
+    release_images();
+    owner->collect();
+    vkDestroySwapchainKHR(owner->device, swapchain, nullptr);
+    vkDestroySurfaceKHR(owner->instance, surface, nullptr);
+  }
+
+  void release_images() {
+    images.clear();
+    for (VkSemaphore semaphore : acquire_semaphores)
+      vkDestroySemaphore(owner->device, semaphore, nullptr);
+    for (VkSemaphore semaphore : present_semaphores)
+      vkDestroySemaphore(owner->device, semaphore, nullptr);
+    acquire_semaphores.clear();
+    present_semaphores.clear();
+    acquire_done.clear();
+    next_slot = 0;
+  }
+
+  bool build(uint32_t width, uint32_t height) {
+    VkSurfaceCapabilitiesKHR capabilities{};
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(owner->physical, surface, &capabilities) != VK_SUCCESS)
+      return false;
+    VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    info.surface = surface;
+    info.minImageCount = capabilities.minImageCount + 1;
+    if (capabilities.maxImageCount)
+      info.minImageCount = std::min(info.minImageCount, capabilities.maxImageCount);
+    info.imageFormat = to_vk(format);
+    info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    info.imageExtent = {std::clamp(width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+                        std::clamp(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)};
+    info.imageArrayLayers = 1;
+    info.imageUsage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.preTransform = capabilities.currentTransform;
+    info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    info.presentMode = mode;
+    info.clipped = VK_TRUE;
+    info.oldSwapchain = swapchain;
+    VkSwapchainKHR created = VK_NULL_HANDLE;
+    if (vkCreateSwapchainKHR(owner->device, &info, nullptr, &created) != VK_SUCCESS)
+      return false;
+    if (swapchain)
+      vkDestroySwapchainKHR(owner->device, swapchain, nullptr);
+    swapchain = created;
+
+    uint32_t count = 0;
+    vkGetSwapchainImagesKHR(owner->device, swapchain, &count, nullptr);
+    std::vector<VkImage> handles(count);
+    vkGetSwapchainImagesKHR(owner->device, swapchain, &count, handles.data());
+    for (VkImage handle : handles) {
+      auto image = std::make_unique<VulkanTexture>();
+      image->owner = owner;
+      image->image = handle;
+      image->rest = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      image->vk_format = info.imageFormat;
+      image->format = format;
+      image->width = info.imageExtent.width;
+      image->height = info.imageExtent.height;
+      VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+      view.image = handle;
+      view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+      view.format = info.imageFormat;
+      view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      if (vkCreateImageView(owner->device, &view, nullptr, &image->target_view) != VK_SUCCESS)
+        return false;
+      images.push_back(std::move(image));
+      const VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+      VkSemaphore acquire_semaphore = VK_NULL_HANDLE, present_semaphore = VK_NULL_HANDLE;
+      vkCreateSemaphore(owner->device, &semaphore, nullptr, &acquire_semaphore);
+      vkCreateSemaphore(owner->device, &semaphore, nullptr, &present_semaphore);
+      acquire_semaphores.push_back(acquire_semaphore);
+      present_semaphores.push_back(present_semaphore);
+      acquire_done.push_back(0);
+    }
+    return true;
+  }
+
+  Texture* acquire() override {
+    const uint32_t slot = next_slot;
+    VkSemaphoreWaitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+    wait.semaphoreCount = 1;
+    wait.pSemaphores = &owner->timeline;
+    wait.pValues = &acquire_done[slot];
+    vkWaitSemaphores(owner->device, &wait, UINT64_MAX);
+    const VkResult result = vkAcquireNextImageKHR(owner->device, swapchain, UINT64_MAX, acquire_semaphores[slot],
+                                                  VK_NULL_HANDLE, &current);
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+      return nullptr;
+    owner->pending_acquire = acquire_semaphores[slot];
+    owner->pending_acquire_done = &acquire_done[slot];
+    next_slot = (slot + 1) % static_cast<uint32_t>(acquire_semaphores.size());
+    return images[current].get();
+  }
+
+  void present() override {
+    const VkSemaphore semaphore = present_semaphores[current];
+    owner->queue_submit(VK_NULL_HANDLE, semaphore);
+    VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    info.waitSemaphoreCount = 1;
+    info.pWaitSemaphores = &semaphore;
+    info.swapchainCount = 1;
+    info.pSwapchains = &swapchain;
+    info.pImageIndices = &current;
+    // Out of date shows at the next acquire.
+    vkQueuePresentKHR(owner->queue, &info);
+  }
+
+  void resize(uint32_t width, uint32_t height) override {
+    owner->wait_idle();
+    vkDeviceWaitIdle(owner->device);
+    release_images();
+    owner->collect(true);
+    build(width, height);
+  }
+};
+
+std::unique_ptr<Swapchain> VulkanDevice::create_swapchain(const SwapchainDesc& desc) {
+  if (!can_present)
+    return nullptr;
+  auto result = std::make_unique<VulkanSwapchain>();
+  result->owner = this;
+  result->format = desc.format;
+#ifdef _WIN32
+  VkWin32SurfaceCreateInfoKHR surface{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+  surface.hinstance = static_cast<HINSTANCE>(desc.window.instance);
+  surface.hwnd = static_cast<HWND>(desc.window.window);
+  if (vkCreateWin32SurfaceKHR(instance, &surface, nullptr, &result->surface) != VK_SUCCESS)
+    return nullptr;
+#endif
+  VkBool32 supported = VK_FALSE;
+  vkGetPhysicalDeviceSurfaceSupportKHR(physical, queue_family, result->surface, &supported);
+  if (!supported) {
+    vkDestroySurfaceKHR(instance, result->surface, nullptr);
+    return nullptr;
+  }
+  uint32_t count = 0;
+  vkGetPhysicalDeviceSurfacePresentModesKHR(physical, result->surface, &count, nullptr);
+  std::vector<VkPresentModeKHR> modes(count);
+  vkGetPhysicalDeviceSurfacePresentModesKHR(physical, result->surface, &count, modes.data());
+  const auto has_mode = [&](VkPresentModeKHR mode) { return std::find(modes.begin(), modes.end(), mode) != modes.end(); };
+  if (desc.mode == PresentMode::Immediate && has_mode(VK_PRESENT_MODE_IMMEDIATE_KHR))
+    result->mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+  else if (desc.mode != PresentMode::Fifo && has_mode(VK_PRESENT_MODE_MAILBOX_KHR))
+    result->mode = VK_PRESENT_MODE_MAILBOX_KHR;
+  if (!result->build(desc.width, desc.height))
+    return nullptr;
+  return result;
+}
+
 } // namespace
 
 std::unique_ptr<Device> create_vulkan_device(const DeviceOptions& options, std::string* error) {
@@ -933,8 +1129,29 @@ std::unique_ptr<Device> create_vulkan_device(const DeviceOptions& options, std::
   VkInstanceCreateInfo instance{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   instance.pApplicationInfo = &app;
   const char* layer = "VK_LAYER_KHRONOS_validation";
-  const char* debug_extension = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
   bool validating = false;
+  // Without a display's extensions the device still works, headless.
+  std::vector<const char*> instance_extensions;
+  {
+    uint32_t count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> available(count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &count, available.data());
+    const auto has = [&](const char* name) {
+      for (const auto& properties : available) {
+        if (std::strcmp(properties.extensionName, name) == 0)
+          return true;
+      }
+      return false;
+    };
+#ifdef _WIN32
+    if (has(VK_KHR_SURFACE_EXTENSION_NAME) && has(VK_KHR_WIN32_SURFACE_EXTENSION_NAME)) {
+      instance_extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+      instance_extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+    }
+#endif
+  }
+  const bool has_surface = !instance_extensions.empty();
   if (options.validation) {
     uint32_t count = 0;
     vkEnumerateInstanceLayerProperties(&count, nullptr);
@@ -945,10 +1162,11 @@ std::unique_ptr<Device> create_vulkan_device(const DeviceOptions& options, std::
     if (validating) {
       instance.enabledLayerCount = 1;
       instance.ppEnabledLayerNames = &layer;
-      instance.enabledExtensionCount = 1;
-      instance.ppEnabledExtensionNames = &debug_extension;
+      instance_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
   }
+  instance.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
+  instance.ppEnabledExtensionNames = instance_extensions.data();
   if (vkCreateInstance(&instance, nullptr, &result->instance) != VK_SUCCESS) {
     *error = "could not create a Vulkan instance";
     return nullptr;
@@ -1041,6 +1259,21 @@ std::unique_ptr<Device> create_vulkan_device(const DeviceOptions& options, std::
   device.queueCreateInfoCount = 1;
   device.pQueueCreateInfos = &queue;
   device.pEnabledFeatures = &features;
+  const char* swapchain_extension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+  {
+    uint32_t extension_count = 0;
+    vkEnumerateDeviceExtensionProperties(result->physical, nullptr, &extension_count, nullptr);
+    std::vector<VkExtensionProperties> available(extension_count);
+    vkEnumerateDeviceExtensionProperties(result->physical, nullptr, &extension_count, available.data());
+    for (const auto& properties : available) {
+      if (has_surface && std::strcmp(properties.extensionName, swapchain_extension) == 0)
+        result->can_present = true;
+    }
+  }
+  if (result->can_present) {
+    device.enabledExtensionCount = 1;
+    device.ppEnabledExtensionNames = &swapchain_extension;
+  }
   if (vkCreateDevice(result->physical, &device, nullptr, &result->device) != VK_SUCCESS) {
     *error = "could not create a Vulkan device";
     return nullptr;
