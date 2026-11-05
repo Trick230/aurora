@@ -22,8 +22,6 @@ using namespace std::string_view_literals;
 
 static Module Log("aurora::gfx::gx");
 
-static std::string shader_helpers() noexcept;
-
 static inline std::string_view chan_comp(GXTevColorChan chan) noexcept {
   switch (chan) {
   case GX_CH_RED:
@@ -1610,7 +1608,7 @@ VertexOutput vs_main(
   return shaderSource;
 }
 
-static std::string shader_helpers() noexcept {
+std::string shader_helpers() noexcept {
   return R"""(
 #define f32 float
 #define u32 uint

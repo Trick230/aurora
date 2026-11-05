@@ -37,6 +37,8 @@ DstAlphaMode dst_alpha_mode(const PipelineConfig& config) noexcept {
   return dstAlphaMode;
 }
 
+static void dump_uber_hlsl(const char* dir) noexcept;
+
 // With AURORA_HLSL_DUMP=<dir>, the HLSL of every pipeline the game asks for, for
 // tests/rhi's check_hlsl: the corpus until the game itself renders through it.
 static void dump_hlsl(const PipelineConfig& config, DstAlphaMode dstAlphaMode) noexcept {
@@ -44,11 +46,25 @@ static void dump_hlsl(const PipelineConfig& config, DstAlphaMode dstAlphaMode) n
   if (dir == nullptr) {
     return;
   }
+  static const bool uberDumped = (dump_uber_hlsl(dir), true);
+  (void)uberDumped;
   const auto source = hlsl::build_shader_source(config.shaderConfig, dstAlphaMode);
   const auto path = fmt::format("{}/{:016x}_{}.hlsl", dir, xxh3_hash(config.shaderConfig), static_cast<int>(dstAlphaMode));
   if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
     std::fwrite(source.data(), 1, source.size(), file);
     std::fclose(file);
+  }
+}
+
+// The ubershader's three sources, the first time the dump runs.
+static void dump_uber_hlsl(const char* dir) noexcept {
+  for (const auto mode : {DstAlphaMode::None, DstAlphaMode::Replace, DstAlphaMode::DualSource}) {
+    const auto source = hlsl::uber_source(mode);
+    const auto path = fmt::format("{}/uber_{}.hlsl", dir, static_cast<int>(mode));
+    if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
+      std::fwrite(source.data(), 1, source.size(), file);
+      std::fclose(file);
+    }
   }
 }
 

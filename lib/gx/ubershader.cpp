@@ -11,6 +11,7 @@
 #include "pipeline.hpp"
 
 #include "../webgpu/gpu.hpp"
+#include "shader_hlsl.hpp"
 #include "shader_info.hpp"
 
 #include <absl/container/flat_hash_map.h>
@@ -1124,17 +1125,8 @@ fn tev_shade(in: VertexOutput) -> vec4f {
 }
 )""";
 
-std::string uber_source(DstAlphaMode mode) {
-  std::string source;
-  if (mode == DstAlphaMode::DualSource) {
-    source += "enable dual_source_blending;\n";
-  }
-  // Each texture is chosen at run time, inside the loop over the stages.
-  source += "diagnostic(off, derivative_uniformity);\n";
-  source += shader_helpers();
-  const auto constant = [&source](std::string_view name, size_t offset) {
-    source += fmt::format("const {} = {}u;\n", name, offset / sizeof(u32));
-  };
+template <typename Constant>
+void for_each_config_word(const Constant& constant) {
   constant("CFG_TEV_STAGES", offsetof(UberConfig, tevStages));
   constant("CFG_VTX_STRIDE", offsetof(UberConfig, vtxStride));
   constant("CFG_LINE_MODE", offsetof(UberConfig, lineMode));
@@ -1163,6 +1155,19 @@ std::string uber_source(DstAlphaMode mode) {
   constant("CFG_ATTRS", offsetof(UberConfig, attrs));
   constant("CFG_STAGES", offsetof(UberConfig, stages));
   constant("CFG_STAGE_WORDS", sizeof(UberStage));
+}
+
+std::string uber_source(DstAlphaMode mode) {
+  std::string source;
+  if (mode == DstAlphaMode::DualSource) {
+    source += "enable dual_source_blending;\n";
+  }
+  // Each texture is chosen at run time, inside the loop over the stages.
+  source += "diagnostic(off, derivative_uniformity);\n";
+  source += shader_helpers();
+  for_each_config_word([&source](std::string_view name, size_t offset) {
+    source += fmt::format("const {} = {}u;\n", name, offset / sizeof(u32));
+  });
   source += UberSource;
   switch (mode) {
   case DstAlphaMode::None:
@@ -1204,6 +1209,37 @@ wgpu::ShaderModule uber_module(DstAlphaMode mode) {
   return module;
 }
 } // namespace
+
+std::string hlsl::uber_source(DstAlphaMode mode) {
+  std::string source = shader_helpers();
+  for_each_config_word([&source](std::string_view name, size_t offset) {
+    source += fmt::format("static const uint {} = {}u;\n", name, offset / sizeof(u32));
+  });
+  source += uber_body();
+  switch (mode) {
+  case DstAlphaMode::None:
+    source += "float4 fs_main(VertexOutput input) : SV_Target {\n  return tev_shade(input);\n}\n";
+    break;
+  case DstAlphaMode::Replace:
+    // The blend constant is the EFB's alpha.
+    source += "float4 fs_main(VertexOutput input) : SV_Target {\n"
+              "  return vec4f(tev_shade(input).rgb, 1.0);\n}\n";
+    break;
+  case DstAlphaMode::DualSource:
+    source += "struct FragmentOutput {\n"
+              "    [[vk::location(0)]] [[vk::index(0)]] float4 color : SV_Target0;\n"
+              "    [[vk::location(0)]] [[vk::index(1)]] float4 blend : SV_Target1;\n"
+              "};\n"
+              "FragmentOutput fs_main(VertexOutput input) {\n"
+              "  float4 prev = tev_shade(input);\n"
+              "  FragmentOutput result;\n"
+              "  result.color = vec4f(prev.rgb, 1.0);\n"
+              "  result.blend = prev;\n"
+              "  return result;\n}\n";
+    break;
+  }
+  return source;
+}
 
 PipelineConfig uber_pipeline_config(const PipelineConfig& config) noexcept {
   PipelineConfig uber = config;
