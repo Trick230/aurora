@@ -3,7 +3,7 @@ include_guard(GLOBAL)
 # aurora_copy_runtime_dlls(<executable_target> [<additional_targets>...])
 #
 # POST_BUILD command that copies all TARGET_RUNTIME_DLLS from the given targets
-# next to the executable, plus any extra DLLs that Dawn loads dynamically
+# next to the executable, plus the DLLs the RHI loads at run time
 # (dxcompiler.dll, dxil.dll).
 function(aurora_copy_runtime_dlls target)
   if (NOT WIN32)

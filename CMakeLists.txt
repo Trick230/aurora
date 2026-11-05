@@ -21,10 +21,6 @@ macro(_aurora_dependency_version name value doc)
 endmacro()
 
 # Dependency versions
-_aurora_dependency_version(AURORA_DAWN_VERSION "v20260618.032059" "Dawn prebuilt version tag (https://github.com/encounter/dawn/releases)"
-        "v20260523.201736" "v20260603.191052") # Previous versions
-_aurora_dependency_version(AURORA_DAWN_REF "266c1cf8de969a364afa4fa49311631fc99a881e" "Dawn commit ref (https://github.com/encounter/dawn)"
-        "9aa45f938d4b36626722bbfdc2f18447179337e6" "13abc3bc8ea2d3c2050f9e77a12d012108ceee24") # Previous versions
 _aurora_dependency_version(AURORA_SDL3_VERSION "3.4.10" "SDL3 prebuilt version tag (https://github.com/libsdl-org/SDL/releases)")
 _aurora_dependency_version(AURORA_SDL3_REF "refs/tags/release-3.4.10" "SDL3 commit ref (https://github.com/libsdl-org/SDL)")
 
@@ -35,13 +31,6 @@ if (WIN32)
 else ()
   set(_default_linkage "static")
 endif ()
-
-# Dawn/WebGPU
-set(AURORA_DAWN_PROVIDER "${_default_provider}" CACHE STRING
-  "How to provide Dawn: auto, vendor (build from source), system (find_package/imported), package (download prebuilt)")
-set_property(CACHE AURORA_DAWN_PROVIDER PROPERTY STRINGS auto vendor system package)
-set(AURORA_DAWN_LINKAGE "${_default_linkage}" CACHE STRING "Dawn linkage type preference")
-set_property(CACHE AURORA_DAWN_LINKAGE PROPERTY STRINGS shared static)
 
 # SDL3
 set(AURORA_SDL3_PROVIDER "${_default_provider}" CACHE STRING

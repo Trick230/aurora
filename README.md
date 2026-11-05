@@ -2,8 +2,8 @@
 
 A renderer for the GX command stream of GameCube and Wii games. A recompiled
 or emulated game writes its retail GX FIFO as it would on the console; Aurora
-decodes it on a render thread of its own and draws it with D3D12, Vulkan or
-Metal, in a window it owns, with frame interpolation, multisampling and
+decodes it on a render thread of its own and draws it with D3D12 or Vulkan,
+in a window it owns, with frame interpolation, multisampling and
 render scaling on top.
 
 This is the fork used by [DualizeRecomp](https://github.com/Trick230/DualizeRecomp).
@@ -49,8 +49,8 @@ Which Aurora to use:
 
 **Rendering**
 
-- D3D12 and Vulkan on Windows, Vulkan on Linux, Metal on macOS, through
-  [Dawn](https://dawn.googlesource.com/dawn/) (WebGPU).
+- D3D12 and Vulkan on Windows, Vulkan on Linux, through its own thin RHI;
+  shaders are HLSL, compiled with DXC to DXIL or SPIR-V.
 - Every TEV, texgen, lighting, fog and blend setup compiled to its own
   pipeline, on a worker pool (the cores less two).
 - EFB copies (shadows, bloom, reflections, render-to-texture) as GPU
@@ -91,7 +91,7 @@ Which Aurora to use:
 ## Building
 
 Requirements: CMake 3.25+, a C++20 compiler (Clang, GCC or MSVC) and Git.
-Dawn and SDL3 are downloaded as prebuilt packages by default.
+SDL3 is downloaded as a prebuilt package by default.
 
 Add the fork as a subdirectory and link its two libraries:
 
@@ -102,15 +102,13 @@ target_link_libraries(your_runtime PRIVATE aurora::core aurora::gx)
 
 | Option | Values | Default |
 |---|---|---|
-| `AURORA_DAWN_PROVIDER` | `auto`, `package` (prebuilt), `vendor` (from source), `system` | `auto` |
-| `AURORA_DAWN_LINKAGE` | `shared`, `static` | `shared` on Windows, else `static` |
-| `AURORA_SDL3_PROVIDER` | as for Dawn | `auto` |
-| `AURORA_SDL3_LINKAGE` | `shared`, `static` | as for Dawn |
-| `AURORA_DAWN_VERSION`, `AURORA_SDL3_VERSION` | the prebuilt release to download | pinned in `CMakeLists.txt` |
+| `AURORA_SDL3_PROVIDER` | `auto`, `package` (prebuilt), `vendor` (from source), `system` | `auto` |
+| `AURORA_SDL3_LINKAGE` | `shared`, `static` | `shared` on Windows, else `static` |
+| `AURORA_SDL3_VERSION` | the prebuilt release to download | pinned in `CMakeLists.txt` |
 
-With a shared Dawn and SDL3, ship `webgpu_dawn` and `SDL3` (`.dll`, `.so` or
-`.dylib`) next to the executable; on Windows also `dxcompiler.dll` and
-`dxil.dll`, which compile the D3D12 shaders.
+With a shared SDL3, ship `SDL3` (`.dll`, `.so` or `.dylib`) next to the
+executable; on Windows also `dxcompiler.dll` and `dxil.dll`, which compile
+the shaders.
 
 ## Quick start
 
@@ -201,14 +199,14 @@ The producer is the one thread that submits: the game's CPU thread.
 | Field | Meaning |
 |---|---|
 | `title` | Window title |
-| `cache_path` | An existing directory for the pipeline cache, Dawn's shader cache and settings |
+| `cache_path` | An existing directory for the pipeline cache and settings |
 | `texture_path` | A directory of HD texture packs (see [Textures](#textures)) |
 | `width`, `height` | The window's starting size |
 | `vsync` | Present on the display's refresh |
 | `interpolate` | Frame interpolation (see below) |
 | `present_rate` | Presents per second without vsync; 0 means the display's refresh rate |
 | `aspect` | The aspect the game's frames are shown at (4:3, 16:9); 0 stretches them to the window |
-| `msaa` | 1 or 4 samples (WebGPU allows no other count) |
+| `msaa` | 1 or 4 samples |
 | `render_scale` | The frame buffer's size over the window's: 1 renders at the window's size, above it renders larger and reduces with an area filter |
 | `dump_textures` | Writes each texture no pack replaces to `<cache_path>/texture_dumps` |
 | `stats` | One line of counters per second on stderr (see [Statistics](#statistics)) |
@@ -321,14 +319,14 @@ With `stats` on, a line a second on stderr:
 - **New pipelines pop in.** A draw whose pipeline is still compiling is
   skipped for those frames. The cache and seed cover what has been played; a
   pipeline nothing has seen still compiles mid-play.
-- **MSAA is 1x or 4x.** WebGPU allows no other sample count.
+- **MSAA is 1x or 4x** for now; 8x is planned.
 - **EFB copies stay on the GPU.** Textures the game samples from a copy's
   address use the copy, but its pixels never reach guest memory, so a game
   that reads them on the CPU sees what was there before.
 - **No C GX API.** The fork renders the FIFO only; decompilation projects
   should use upstream.
-- **Tested on Windows** (D3D12 and Vulkan). Linux and macOS have the code
-  paths (Vulkan, Metal, a portable frame pacer) but no testing yet.
+- **Tested on Windows** (D3D12 and Vulkan). Linux has the code paths
+  (Vulkan, a portable frame pacer) but no testing yet; macOS has no backend.
 
 ## License
 
