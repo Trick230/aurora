@@ -239,6 +239,10 @@ static void seal_pass(FramePacket& frame, uint32_t passIndex) {
 
 static void encode_op(rhi::CommandList& list, FramePacket& frame, const FrameOp& op);
 static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passInfo);
+// The frame interpolation last replayed, the oldest one still drawn: groups it
+// binds stay however far the game has moved on. The render worker's.
+static uint32_t g_replayedFrameIndex = UINT32_MAX;
+
 static void expire_cached_bind_groups();
 static void push_command(CommandType type, const Command::Data& data);
 static void replay_frame(rhi::CommandList& list, FramePacket& frame);
@@ -730,6 +734,7 @@ void end_frame(EndFrameCallback callback) {
       // interpolation reaches it; what is shown are its replays. Its slot is
       // held until then.
       auto retained = std::make_shared<FramePacket>();
+      retained->frameIndex = packet.frameIndex;
       retained->renderPasses = std::move(packet.renderPasses);
       retained->ops = std::move(packet.ops);
       g_lastUniformShadowSize = packet.uniformShadow.size();
@@ -739,7 +744,11 @@ void end_frame(EndFrameCallback callback) {
       packet = {};
       interp::push_frame(
           std::move(uniforms), std::move(draws), std::move(cameras),
-          [retained](rhi::CommandList& replay) { replay_frame(replay, *retained); }, std::move(callback),
+          [retained](rhi::CommandList& replay) {
+            g_replayedFrameIndex = retained->frameIndex;
+            replay_frame(replay, *retained);
+          },
+          std::move(callback),
           [list, finished] {
             list->end();
             finished(g_device->submit(*list));
@@ -768,8 +777,9 @@ static void expire_cached_bind_groups() {
     return;
   }
 
+  const uint32_t now = std::min(g_frameIndex, g_replayedFrameIndex);
   for (auto it = g_cachedBindGroups.begin(); it != g_cachedBindGroups.end();) {
-    if (g_frameIndex - it->second.lastUsedFrame > BindGroupCacheRetainFrames) {
+    if (it->second.lastUsedFrame + BindGroupCacheRetainFrames < now) {
       g_cachedBindGroups.erase(it++);
     } else {
       ++it;
