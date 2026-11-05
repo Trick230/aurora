@@ -12,5 +12,11 @@ if (MINGW)
 endif ()
 add_custom_command(TARGET test_rhi POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${AURORA_RHI_RUNTIME_FILES} $<TARGET_FILE_DIR:test_rhi>)
+# Compiles a folder of generated HLSL on every backend: AURORA_HLSL_DUMP's output.
+add_executable(check_hlsl check_hlsl.cpp)
+target_link_libraries(check_hlsl PRIVATE aurora_rhi)
+if (MINGW)
+    target_link_options(check_hlsl PRIVATE -static)
+endif ()
 enable_testing()
 add_test(NAME rhi COMMAND test_rhi)

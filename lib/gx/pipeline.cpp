@@ -1,3 +1,8 @@
+#include "shader_hlsl.hpp"
+
+#include <cstdio>
+#include <cstdlib>
+
 #include "pipeline.hpp"
 
 #include "../gfx/frame_interp.hpp"
@@ -32,8 +37,24 @@ DstAlphaMode dst_alpha_mode(const PipelineConfig& config) noexcept {
   return dstAlphaMode;
 }
 
+// With AURORA_HLSL_DUMP=<dir>, the HLSL of every pipeline the game asks for, for
+// tests/rhi's check_hlsl: the corpus until the game itself renders through it.
+static void dump_hlsl(const PipelineConfig& config, DstAlphaMode dstAlphaMode) noexcept {
+  static const char* const dir = std::getenv("AURORA_HLSL_DUMP");
+  if (dir == nullptr) {
+    return;
+  }
+  const auto source = hlsl::build_shader_source(config.shaderConfig, dstAlphaMode);
+  const auto path = fmt::format("{}/{:016x}_{}.hlsl", dir, xxh3_hash(config.shaderConfig), static_cast<int>(dstAlphaMode));
+  if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
+    std::fwrite(source.data(), 1, source.size(), file);
+    std::fclose(file);
+  }
+}
+
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   const auto dstAlphaMode = dst_alpha_mode(config);
+  dump_hlsl(config, dstAlphaMode);
   const auto shader = build_shader(config.shaderConfig, dstAlphaMode);
   const auto label = fmt::format("GX Pipeline {:x} shader {:x}",
                                  xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)),

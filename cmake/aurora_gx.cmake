@@ -19,6 +19,7 @@ add_library(aurora_gx STATIC
         lib/gx/pipeline.cpp
         lib/gx/recomp.cpp
         lib/gx/shader.cpp
+        lib/gx/shader_hlsl.cpp
         lib/gx/shader_info.cpp
         lib/gx/ubershader.cpp
         lib/gfx/png_io.cpp
