@@ -1,7 +1,7 @@
 add_library(aurora_gx STATIC
         lib/gfx/clear.cpp
         lib/gfx/common.cpp
-        lib/gfx/frame_interp_off.cpp
+        lib/gfx/frame_interp.cpp
         lib/gfx/pipeline_cache.cpp
         lib/gfx/render_worker.cpp
         lib/gfx/tex_copy_conv.cpp

@@ -357,6 +357,8 @@ public:
 
   void copy_buffer(Buffer& source, uint64_t source_offset, Buffer& destination, uint64_t destination_offset,
                    uint64_t size) override {
+    // The destination may still be read by what an earlier submit draws.
+    memory_barrier(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     const VkBufferCopy region{source_offset, destination_offset, size};
     vkCmdCopyBuffer(list, static_cast<VulkanBuffer&>(source).buffer, static_cast<VulkanBuffer&>(destination).buffer, 1,
                     &region);

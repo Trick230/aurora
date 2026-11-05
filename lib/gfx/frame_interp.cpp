@@ -32,7 +32,7 @@
 
 
 namespace aurora::gfx {
-const wgpu::BindGroup* interp::g_vertexUniformBindGroup = &g_uniformBindGroup;
+rhi::BindGroup* interp::g_vertexUniformBindGroup = nullptr;
 }
 
 namespace aurora::gfx::interp {
@@ -41,7 +41,6 @@ Module Log("aurora::gfx::interp");
 
 using Clock = std::chrono::steady_clock;
 using webgpu::g_device;
-using webgpu::g_queue;
 
 // The matrices of a GX uniform block, in floats (gx/shader_info.cpp
 // build_uniform): the projection, the position matrices, the texture matrices
@@ -153,8 +152,19 @@ uint8_t pair_slot(uint32_t source, uint32_t slot, const DrawRecord& other, uint3
 bool g_enabled = false;
 bool g_vsync = true;
 Clock::duration g_interval{};
-wgpu::Buffer g_buffer;
-wgpu::BindGroup g_bindGroup;
+std::unique_ptr<rhi::Buffer> g_buffer;
+std::unique_ptr<rhi::BindGroup> g_bindGroup;
+// The group draws bind when they aren't replaying.
+rhi::BindGroup* g_frameBindGroup = nullptr;
+// A replay's list and what it copies into g_buffer, reused once its ticket is done.
+struct Replay {
+  std::unique_ptr<rhi::CommandList> list;
+  std::unique_ptr<rhi::Buffer> upload;
+  uint64_t ticket = 0;
+};
+constexpr size_t ReplayCount = 4;
+std::array<Replay, ReplayCount> g_replays;
+size_t g_nextReplay = 0;
 std::atomic_bool g_replaying = false;
 
 // Render worker only.
@@ -1136,8 +1146,9 @@ struct WayBack {
 };
 std::vector<WayBack> g_backs;
 
-// Writes the blended uniform stream at t into g_buffer.
-void blend(float t) {
+// Has the blended uniform stream at t written into g_buffer before what the list
+// goes on to draw.
+void blend(float t, rhi::CommandList& list, rhi::Buffer& upload) {
   auto* dst = reinterpret_cast<float*>(g_scratch.data());
   const auto* curBase = reinterpret_cast<const float*>(g_cur.uniforms.data());
   // For each camera move, the way back from the newer eye space to the one at
@@ -1231,11 +1242,24 @@ void blend(float t) {
   if (!g_uploaded) {
     // The first replay of a frame writes all of it; later ones only the span
     // the blended blocks cover, the rest is unchanged.
-    g_queue.WriteBuffer(g_buffer, 0, g_scratch.data(), AURORA_ALIGN(g_scratch.size(), 4));
+    const uint64_t size = AURORA_ALIGN(g_scratch.size(), 4);
+    std::memcpy(upload.mapped(), g_scratch.data(), g_scratch.size());
+    list.copy_buffer(upload, 0, *g_buffer, 0, size);
     g_uploaded = true;
   } else if (g_dirtyEnd > g_dirtyBegin) {
-    g_queue.WriteBuffer(g_buffer, g_dirtyBegin, g_scratch.data() + g_dirtyBegin, g_dirtyEnd - g_dirtyBegin);
+    auto* const mapped = static_cast<uint8_t*>(upload.mapped());
+    std::memcpy(mapped + g_dirtyBegin, g_scratch.data() + g_dirtyBegin, g_dirtyEnd - g_dirtyBegin);
+    list.copy_buffer(upload, g_dirtyBegin, *g_buffer, g_dirtyBegin, g_dirtyEnd - g_dirtyBegin);
   }
+}
+
+// The next replay's list, begun, once the GPU has finished with its last use.
+Replay& begin_replay() {
+  auto& replay = g_replays[g_nextReplay];
+  g_nextReplay = (g_nextReplay + 1) % ReplayCount;
+  g_device->wait(replay.ticket);
+  replay.list->begin();
+  return replay;
 }
 
 // How long before it is needed a frame should arrive: what its arrival
@@ -1270,33 +1294,20 @@ void capture(float t, const char* name) {
   const uint32_t width = source.size.width;
   const uint32_t height = source.size.height;
   const uint32_t row = AURORA_ALIGN(width * 4, 256);
-  const wgpu::BufferDescriptor bufferDescriptor{
-      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
-      .size = uint64_t{row} * height,
-  };
-  auto buffer = g_device.CreateBuffer(&bufferDescriptor);
-  auto encoder = g_device.CreateCommandEncoder();
-  blend(t);
-  g_vertexUniformBindGroup = &g_bindGroup;
+  const auto buffer = g_device->create_buffer({uint64_t{row} * height, rhi::MemoryKind::Readback});
+  auto& replay = begin_replay();
+  blend(t, *replay.list, *replay.upload);
+  g_vertexUniformBindGroup = g_bindGroup.get();
   g_replaying.store(true, std::memory_order_relaxed);
-  g_cur.replay(encoder);
+  g_cur.replay(*replay.list);
   g_replaying.store(false, std::memory_order_relaxed);
-  g_vertexUniformBindGroup = &g_uniformBindGroup;
-  const wgpu::TexelCopyTextureInfo src{.texture = source.texture};
-  const wgpu::TexelCopyBufferInfo dst{.layout = {.bytesPerRow = row, .rowsPerImage = height}, .buffer = buffer};
-  const wgpu::Extent3D extent{width, height, 1};
-  encoder.CopyTextureToBuffer(&src, &dst, &extent);
-  const auto commands = encoder.Finish();
-  g_queue.Submit(1, &commands);
-  bool done = false;
-  const auto future = buffer.MapAsync(wgpu::MapMode::Read, 0, bufferDescriptor.size, wgpu::CallbackMode::WaitAnyOnly,
-                                      [&](wgpu::MapAsyncStatus, wgpu::StringView) { done = true; });
-  webgpu::g_instance.WaitAny(future, UINT64_MAX);
-  if (!done) {
-    return;
-  }
-  const auto* pixels = static_cast<const uint8_t*>(buffer.GetConstMappedRange());
-  const bool bgra = source.format == wgpu::TextureFormat::BGRA8Unorm || source.format == wgpu::TextureFormat::BGRA8UnormSrgb;
+  g_vertexUniformBindGroup = g_frameBindGroup;
+  replay.list->copy_texture_to_buffer(*source.texture, {}, *buffer, 0, row);
+  replay.list->end();
+  replay.ticket = g_device->submit(*replay.list);
+  g_device->wait(replay.ticket);
+  const auto* pixels = static_cast<const uint8_t*>(buffer->mapped());
+  const bool bgra = source.format == rhi::Format::BGRA8Unorm || source.format == rhi::Format::BGRA8Srgb;
   char path[512];
   std::snprintf(path, sizeof(path), "%s/%s.ppm", dir, name);
   if (FILE* file = std::fopen(path, "wb")) {
@@ -1313,7 +1324,6 @@ void capture(float t, const char* name) {
     }
     std::fclose(file);
   }
-  buffer.Unmap();
 }
 
 float time_at(Clock::time_point shown) {
@@ -1363,20 +1373,17 @@ void present_tick() {
   if (unclamped > 1.f && unclamped < 3.f && !g_next.submit) {
     ++g_stats.interpStarved;
   }
-  static constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Interpolated frame encoder"};
-  auto encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
-  // Every replay of a frame binds the blended copy, so its render bundles
-  // are recorded once.
+  auto& replay = begin_replay();
   static const bool noBlend = std::getenv("AURORA_INTERP_NOBLEND") != nullptr;
-  blend(last || noBlend ? 1.f : t);
-  g_vertexUniformBindGroup = &g_bindGroup;
+  blend(last || noBlend ? 1.f : t, *replay.list, *replay.upload);
+  g_vertexUniformBindGroup = g_bindGroup.get();
   g_replaying.store(true, std::memory_order_relaxed);
-  g_cur.replay(encoder);
+  g_cur.replay(*replay.list);
   g_replaying.store(false, std::memory_order_relaxed);
-  g_vertexUniformBindGroup = &g_uniformBindGroup;
+  g_vertexUniformBindGroup = g_frameBindGroup;
   g_stats.interpMicros +=
       static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
-  g_cur.present(encoder);
+  replay.ticket = g_cur.present(*replay.list);
   ++g_stats.interpPresents;
   const auto presented = Clock::now();
   const auto sinceLast = presented - g_lastPresent;
@@ -1461,26 +1468,18 @@ void initialize(bool vsync, uint32_t presentRate) {
   }
   g_interval = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<float>(1.f / rate));
 
-  const wgpu::BufferDescriptor bufferDescriptor{
-      .label = "Interpolated uniform buffer",
-      .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
-      .size = UniformBufferSize,
-  };
-  g_buffer = g_device.CreateBuffer(&bufferDescriptor);
-  const std::array entries{
-      wgpu::BindGroupEntry{
-          .binding = 0,
-          .buffer = g_buffer,
-          .size = gx::MaxUniformSize,
-      },
-  };
-  const wgpu::BindGroupDescriptor bindGroupDescriptor{
-      .label = "Interpolated uniform bind group",
-      .layout = g_uniformBindGroupLayout,
-      .entryCount = entries.size(),
-      .entries = entries.data(),
-  };
-  g_bindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+  g_buffer = g_device->create_buffer({UniformBufferSize});
+  for (auto& replay : g_replays) {
+    replay.list = g_device->create_command_list();
+    replay.upload = g_device->create_buffer({UniformBufferSize, rhi::MemoryKind::Upload});
+    replay.ticket = 0;
+  }
+  rhi::BindingValue value{};
+  value.binding = 0;
+  value.buffer = g_buffer.get();
+  value.size = gx::MaxUniformSize;
+  g_bindGroup = g_device->create_bind_group({g_uniformBindGroupLayout, &value, 1});
+  g_frameBindGroup = g_vertexUniformBindGroup;
   g_stop = false;
   g_pending = false;
   g_ticking = false;
@@ -1511,9 +1510,13 @@ void shutdown() {
   g_cur = {};
   g_scratch.release();
   g_blends.clear();
-  g_bindGroup = {};
-  g_buffer = {};
-  g_vertexUniformBindGroup = &g_uniformBindGroup;
+  g_device->wait_idle();
+  g_vertexUniformBindGroup = g_frameBindGroup;
+  g_bindGroup.reset();
+  g_buffer.reset();
+  for (auto& replay : g_replays) {
+    replay = {};
+  }
 }
 
 void discard() {
