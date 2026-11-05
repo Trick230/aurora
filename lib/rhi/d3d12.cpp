@@ -209,6 +209,7 @@ public:
     UINT first_uniform = 0, srv_table = UINT_MAX, sampler_table = UINT_MAX;
   };
   std::vector<Group> groups;
+  UINT draw_constant = UINT_MAX;
 };
 
 class D3D12RenderPipeline final : public RenderPipeline {
@@ -297,9 +298,14 @@ public:
     const FLOAT factor[4] = {r, g, b, a};
     list->OMSetBlendFactor(factor);
   }
-  void draw(uint32_t vertices, uint32_t first_vertex) override { list->DrawInstanced(vertices, 1, first_vertex, 0); }
-  void draw_indexed(uint32_t indices, uint32_t first_index, int32_t base_vertex) override {
-    list->DrawIndexedInstanced(indices, 1, first_index, base_vertex, 0);
+  void set_draw_constant(uint32_t value) override {
+    list->SetGraphicsRoot32BitConstant(layout->draw_constant, value, 0);
+  }
+  void draw(uint32_t vertices, uint32_t first_vertex, uint32_t instances) override {
+    list->DrawInstanced(vertices, instances, first_vertex, 0);
+  }
+  void draw_indexed(uint32_t indices, uint32_t first_index, int32_t base_vertex, uint32_t instances) override {
+    list->DrawIndexedInstanced(indices, instances, first_index, base_vertex, 0);
   }
 
   void copy_buffer(Buffer& source, uint64_t source_offset, Buffer& destination, uint64_t destination_offset,
@@ -659,6 +665,16 @@ public:
         slots.srv_table = add_table(group.srvs, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
       if (!group.samplers.empty())
         slots.sampler_table = add_table(group.samplers, D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER);
+    }
+    if (desc.draw_constant) {
+      D3D12_ROOT_PARAMETER parameter{};
+      parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+      parameter.Constants.ShaderRegister = 0;
+      parameter.Constants.RegisterSpace = desc.count;
+      parameter.Constants.Num32BitValues = 1;
+      parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+      layout->draw_constant = static_cast<UINT>(parameters.size());
+      parameters.push_back(parameter);
     }
     D3D12_ROOT_SIGNATURE_DESC root{};
     root.NumParameters = static_cast<UINT>(parameters.size());

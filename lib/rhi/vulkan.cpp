@@ -345,9 +345,14 @@ public:
     const float constants[4] = {r, g, b, a};
     vkCmdSetBlendConstants(list, constants);
   }
-  void draw(uint32_t vertices, uint32_t first_vertex) override { vkCmdDraw(list, vertices, 1, first_vertex, 0); }
-  void draw_indexed(uint32_t indices, uint32_t first_index, int32_t base_vertex) override {
-    vkCmdDrawIndexed(list, indices, 1, first_index, base_vertex, 0);
+  void set_draw_constant(uint32_t value) override {
+    vkCmdPushConstants(list, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(value), &value);
+  }
+  void draw(uint32_t vertices, uint32_t first_vertex, uint32_t instances) override {
+    vkCmdDraw(list, vertices, instances, first_vertex, 0);
+  }
+  void draw_indexed(uint32_t indices, uint32_t first_index, int32_t base_vertex, uint32_t instances) override {
+    vkCmdDrawIndexed(list, indices, instances, first_index, base_vertex, 0);
   }
 
   void copy_buffer(Buffer& source, uint64_t source_offset, Buffer& destination, uint64_t destination_offset,
@@ -708,6 +713,11 @@ public:
     VkPipelineLayoutCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     info.setLayoutCount = desc.count;
     info.pSetLayouts = sets.data();
+    const VkPushConstantRange draw_constant{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uint32_t)};
+    if (desc.draw_constant) {
+      info.pushConstantRangeCount = 1;
+      info.pPushConstantRanges = &draw_constant;
+    }
     auto layout = std::make_unique<VulkanPipelineLayout>();
     layout->owner = this;
     if (vkCreatePipelineLayout(device, &info, nullptr, &layout->layout) != VK_SUCCESS)

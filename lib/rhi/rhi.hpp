@@ -162,6 +162,9 @@ public:
 struct PipelineLayoutDesc {
   BindGroupLayout* const* groups = nullptr;
   uint32_t count = 0;
+  // One value per draw for the vertex stage, set_draw_constant's: in HLSL, a
+  // [[vk::push_constant]] ConstantBuffer at b0, in the space after the last group.
+  bool draw_constant = false;
 };
 
 enum class ShaderStage { Vertex, Fragment };
@@ -276,8 +279,9 @@ public:
   virtual void set_viewport(float x, float y, float width, float height, float min_depth, float max_depth) = 0;
   virtual void set_scissor(uint32_t x, uint32_t y, uint32_t width, uint32_t height) = 0;
   virtual void set_blend_constant(float r, float g, float b, float a) = 0;
-  virtual void draw(uint32_t vertices, uint32_t first_vertex) = 0;
-  virtual void draw_indexed(uint32_t indices, uint32_t first_index, int32_t base_vertex) = 0;
+  virtual void set_draw_constant(uint32_t value) = 0;
+  virtual void draw(uint32_t vertices, uint32_t first_vertex, uint32_t instances = 1) = 0;
+  virtual void draw_indexed(uint32_t indices, uint32_t first_index, int32_t base_vertex, uint32_t instances = 1) = 0;
 
   // Outside render passes. A zero width or height in a region means the mip's.
   virtual void copy_buffer(Buffer& source, uint64_t source_offset, Buffer& destination, uint64_t destination_offset,

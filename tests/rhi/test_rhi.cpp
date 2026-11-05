@@ -99,6 +99,30 @@ float4 fs_main(float4 position : SV_Position) : SV_Target {
 }
 )";
 
+// Quads placed by the draw constant and the instance: what a GX draw's vertex offset
+// and its expanded lines ask for.
+const char* const DrawConstantShader = R"(
+struct DrawConstants {
+  uint value;
+};
+[[vk::push_constant]] ConstantBuffer<DrawConstants> draw : register(b0, space0);
+struct Varyings {
+  float4 position : SV_Position;
+  float3 color : TEXCOORD0;
+};
+Varyings vs_main(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
+  static const float2 corners[6] = {float2(0, 0), float2(1, 0), float2(1, 1), float2(0, 0), float2(1, 1), float2(0, 1)};
+  const float top = draw.value < 100u ? 0.0 : -1.0;
+  Varyings output;
+  output.position = float4(-1.0 + (float(instance) + corners[vertex].x) * 0.5, top + corners[vertex].y, 0.0, 1.0);
+  output.color = float3(float(draw.value) / 255.0, float((instance + 1u) * 40u) / 255.0, 0.0);
+  return output;
+}
+float4 fs_main(Varyings input) : SV_Target {
+  return float4(input.color, 1.0);
+}
+)";
+
 ShaderCode compile(Device& device, ShaderStage stage, const char* source, const char* entry) {
   ShaderCode code;
   std::string error;
@@ -382,6 +406,63 @@ std::vector<Pixels> render(Device& device) {
   return results;
 }
 
+// Two instanced draws with their own constants, one of them indexed. Returns the
+// image, or nothing if a quad isn't where and what it should be.
+Pixels render_draw_constants(Device& device, int& failures) {
+  static const uint16_t indices[] = {0, 1, 2, 3, 4, 5};
+  auto upload = must(device.create_buffer({sizeof(indices), MemoryKind::Upload}), "upload");
+  auto index_buffer = must(device.create_buffer({sizeof(indices)}), "indices");
+  auto readback = must(device.create_buffer({uint64_t{BytesPerRow} * Height, MemoryKind::Readback}), "readback");
+  std::memcpy(upload->mapped(), indices, sizeof(indices));
+  auto layout = must(device.create_pipeline_layout({nullptr, 0, true}), "draw constant layout");
+  const ShaderCode vertex = compile(device, ShaderStage::Vertex, DrawConstantShader, "vs_main");
+  const ShaderCode fragment = compile(device, ShaderStage::Fragment, DrawConstantShader, "fs_main");
+  RenderPipelineDesc desc;
+  desc.layout = layout.get();
+  desc.vertex = &vertex;
+  desc.vertex_entry = "vs_main";
+  desc.fragment = &fragment;
+  desc.fragment_entry = "fs_main";
+  auto pipeline = must(device.create_render_pipeline(desc), "draw constant pipeline");
+  auto target =
+      must(device.create_texture({Width, Height, 1, 1, Format::RGBA8Unorm, TextureSampled | TextureColorTarget}), "target");
+  auto list = must(device.create_command_list(), "command list");
+  list->begin();
+  list->copy_buffer(*upload, 0, *index_buffer, 0, sizeof(indices));
+  RenderPassDesc pass;
+  pass.color.target = target.get();
+  pass.color.clear = true;
+  list->begin_render_pass(pass);
+  list->set_pipeline(*pipeline);
+  list->set_index_buffer_u16(*index_buffer, 0);
+  list->set_draw_constant(10);
+  list->draw(6, 0, 2);
+  list->set_draw_constant(200);
+  list->draw_indexed(6, 0, 0, 3);
+  list->end_render_pass();
+  list->copy_texture_to_buffer(*target, {0}, *readback, 0, BytesPerRow);
+  list->end();
+  device.submit(*list);
+  device.wait_idle();
+  Pixels pixels = read_pixels(*readback, 0);
+  const struct {
+    uint32_t x, y;
+    uint8_t red, green;
+  } expected[] = {
+      {Width / 8, Height / 4, 10, 40},        {Width * 3 / 8, Height / 4, 10, 80},
+      {Width * 5 / 8, Height / 4, 0, 0},      {Width / 8, Height * 3 / 4, 200, 40},
+      {Width * 5 / 8, Height * 3 / 4, 200, 120}, {Width * 7 / 8, Height * 3 / 4, 0, 0},
+  };
+  for (const auto& at : expected) {
+    const uint8_t* pixel = pixels.data() + (size_t{at.y} * Width + at.x) * 4;
+    if (pixel[0] != at.red || pixel[1] != at.green) {
+      std::printf("draw constant at %u,%u: got %u %u, wanted %u %u\n", at.x, at.y, pixel[0], pixel[1], at.red, at.green);
+      ++failures;
+    }
+  }
+  return pixels;
+}
+
 #ifdef _WIN32
 // Frames through a real swapchain, in a window never shown, in every present mode
 // and across a resize: each frame's color has to reach the image that was acquired.
@@ -476,6 +557,7 @@ int main() {
       ++failures;
     }
     results[i] = render(*device);
+    results[i].push_back(render_draw_constants(*device, failures));
     device->wait_idle();
 #ifdef _WIN32
     const int swapchain_failures = test_swapchain(*device);
@@ -508,7 +590,7 @@ int main() {
     std::printf("no results to compare\n");
     return 1;
   }
-  const char* const names[] = {"scene 4x", "depth read", "scene 8x"};
+  const char* const names[] = {"scene 4x", "depth read", "scene 8x", "draw constants"};
   for (size_t r = 0; r < results[0].size(); ++r) {
     const Pixels& a = results[0][r];
     const Pixels& b = results[1][r];
