@@ -344,7 +344,11 @@ public:
   virtual std::unique_ptr<RenderPipeline> create_render_pipeline(const RenderPipelineDesc& desc) = 0;
   virtual std::unique_ptr<CommandList> create_command_list() = 0;
   virtual std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) = 0;
-  virtual void submit(CommandList& list) = 0;
+  // A list can begin again, and what it used be written again, once its ticket is
+  // done. The tickets are the order of submission, from the one thread that submits.
+  virtual uint64_t submit(CommandList& list) = 0;
+  virtual bool is_done(uint64_t ticket) = 0;
+  virtual void wait(uint64_t ticket) = 0;
   virtual void wait_idle() = 0;
 };
 

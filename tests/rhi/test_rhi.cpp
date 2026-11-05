@@ -443,8 +443,12 @@ Pixels render_draw_constants(Device& device, int& failures) {
   list->end_render_pass();
   list->copy_texture_to_buffer(*target, {0}, *readback, 0, BytesPerRow);
   list->end();
-  device.submit(*list);
-  device.wait_idle();
+  const uint64_t ticket = device.submit(*list);
+  device.wait(ticket);
+  if (!device.is_done(ticket)) {
+    std::printf("the ticket isn't done after waiting for it\n");
+    ++failures;
+  }
   Pixels pixels = read_pixels(*readback, 0);
   const struct {
     uint32_t x, y;

@@ -850,8 +850,23 @@ public:
 
   std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
 
-  void submit(CommandList& list) override {
+  uint64_t submit(CommandList& list) override {
     queue_submit(static_cast<VulkanCommandList&>(list).list, VK_NULL_HANDLE);
+    return timeline_value;
+  }
+
+  bool is_done(uint64_t ticket) override {
+    uint64_t done = 0;
+    vkGetSemaphoreCounterValue(device, timeline, &done);
+    return done >= ticket;
+  }
+
+  void wait(uint64_t ticket) override {
+    VkSemaphoreWaitInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+    info.semaphoreCount = 1;
+    info.pSemaphores = &timeline;
+    info.pValues = &ticket;
+    vkWaitSemaphores(device, &info, UINT64_MAX);
   }
 
   // Everything goes through here: new textures' layouts first, and a wait for the

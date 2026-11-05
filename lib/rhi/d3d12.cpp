@@ -750,12 +750,23 @@ public:
     return list;
   }
 
-  void submit(CommandList& list) override {
+  uint64_t submit(CommandList& list) override {
     ID3D12CommandList* lists[] = {static_cast<D3D12CommandList&>(list).list.Get()};
     queue->ExecuteCommandLists(1, lists);
-    queue->Signal(fence.Get(), ++fence_value);
+    const UINT64 ticket = ++fence_value;
+    queue->Signal(fence.Get(), ticket);
     collect();
     drain_messages();
+    return ticket;
+  }
+
+  bool is_done(uint64_t ticket) override { return fence->GetCompletedValue() >= ticket; }
+
+  void wait(uint64_t ticket) override {
+    if (fence->GetCompletedValue() < ticket) {
+      fence->SetEventOnCompletion(ticket, fence_event);
+      WaitForSingleObject(fence_event, INFINITE);
+    }
   }
 
   void wait_idle() override {
