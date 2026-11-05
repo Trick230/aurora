@@ -7,7 +7,6 @@
 #include <utility>
 #include <vector>
 
-#include <webgpu/webgpu_cpp.h>
 #include <SDL3/SDL_events.h>
 
 #include "internal.hpp"
@@ -17,7 +16,6 @@
 
 #define IMGUI_IMPL_WEBGPU_BACKEND_DAWN
 #include "backends/imgui_impl_sdl3.h"
-#include "backends/imgui_impl_wgpu.h"
 
 namespace aurora::imgui {
 static float g_scale;
@@ -47,17 +45,12 @@ void create_context() noexcept {
 
 void initialize() noexcept {
   ImGui_ImplSDL3_InitForOther(window::get_sdl_window());
-  ImGui_ImplWGPU_InitInfo info;
-  info.Device = webgpu::g_device.Get();
-  info.RenderTargetFormat = static_cast<WGPUTextureFormat>(webgpu::g_graphicsConfig.surfaceConfiguration.format);
-  ImGui_ImplWGPU_Init(&info);
 }
 
 bool active() noexcept { return g_active; }
 void set_active(bool active) noexcept { g_active = active; }
 
 void shutdown() noexcept {
-  ImGui_ImplWGPU_Shutdown();
   ImGui_ImplSDL3_Shutdown();
   ImGui::DestroyContext();
 }
@@ -69,32 +62,9 @@ void process_event(const SDL_Event& event) noexcept {
 }
 
 void new_frame(const AuroraWindowSize& size) noexcept {
-  g_frameStarted = g_active;
-  if (!g_frameStarted) {
-    return;
-  }
-  ImVec2 framebufferScale{
-      size.width > 0 ? static_cast<float>(size.native_fb_width) / static_cast<float>(size.width) : 1.0f,
-      size.height > 0 ? static_cast<float>(size.native_fb_height) / static_cast<float>(size.height) : 1.0f,
-  };
-  const ImVec2 displaySize{static_cast<float>(size.width), static_cast<float>(size.height)};
-
-  if (g_scale != size.scale) {
-    if (g_scale > 0.f) {
-      ImGui_ImplWGPU_CreateDeviceObjects();
-    }
-    g_scale = size.scale;
-  }
-  if (!ImGui::GetIO().Fonts->IsBuilt()) {
-    ImGui_ImplWGPU_CreateDeviceObjects();
-  }
-  ImGui_ImplWGPU_NewFrame();
-  ImGui_ImplSDL3_NewFrame();
-
-  ImGuiIO& io = ImGui::GetIO();
-  io.DisplayFramebufferScale = framebufferScale;
-  ImGui::GetIO().DisplaySize = displaySize;
-  ImGui::NewFrame();
+  // No renderer for ImGui on the RHI yet.
+  (void)size;
+  g_frameStarted = false;
 }
 
 DrawData freeze() noexcept {
@@ -117,19 +87,7 @@ DrawData freeze() noexcept {
   return DrawData{std::move(frozen)};
 }
 
-void render(const wgpu::RenderPassEncoder& pass, const DrawData& drawData) noexcept {
-
-  if (!drawData.m_impl) {
-    return;
-  }
-  auto* data = &drawData.m_impl->drawData;
-  if (data->CmdListsCount == 0) {
-    return;
-  }
-  pass.PushDebugGroup("Aurora: Dear Imgui");
-  ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
-  pass.PopDebugGroup();
-}
+void render(rhi::CommandList&, const DrawData&) noexcept {}
 
 } // namespace aurora::imgui
 

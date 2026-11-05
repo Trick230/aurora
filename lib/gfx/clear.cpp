@@ -2,122 +2,61 @@
 
 #include "../webgpu/gpu.hpp"
 
-namespace {
-wgpu::ColorWriteMask clear_write_mask(bool clearColor, bool clearAlpha) {
-  auto writeMask = wgpu::ColorWriteMask::None;
-  if (clearColor) {
-    writeMask |= wgpu::ColorWriteMask::Red | wgpu::ColorWriteMask::Green | wgpu::ColorWriteMask::Blue;
-  }
-  if (clearAlpha) {
-    writeMask |= wgpu::ColorWriteMask::Alpha;
-  }
-  return writeMask;
-}
-} // namespace
+#include <mutex>
 
 namespace aurora::gfx::clear {
 
 using webgpu::g_device;
 using webgpu::g_graphicsConfig;
 
-wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
-  wgpu::ShaderSourceWGSL sourceDescriptor{};
-  sourceDescriptor.code = R"""(
-struct VertexOutput {
-    @builtin(position) pos: vec4<f32>,
-};
+static constexpr const char* ClearShader = R"(
+static const float2 positions[3] = {float2(-1.0, 1.0), float2(-1.0, -3.0), float2(3.0, 1.0)};
+float4 vs_main(uint vtxIdx : SV_VertexID) : SV_Position {
+    return float4(positions[vtxIdx], 0.0, 1.0);
+}
+float4 fs_main() : SV_Target {
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+)";
 
-var<private> pos: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(-1.0, 1.0),
-    vec2(-1.0, -3.0),
-    vec2(3.0, 1.0),
-);
-
-@vertex
-fn vs_main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
-    var out: VertexOutput;
-    out.pos = vec4<f32>(pos[vtxIdx], 0.0, 1.0);
-    return out;
+std::shared_ptr<rhi::RenderPipeline> create_pipeline(const PipelineConfig& config) {
+  static std::mutex mutex;
+  static std::unique_ptr<rhi::PipelineLayout> layout;
+  static rhi::ShaderCode vertex, fragment;
+  {
+    std::scoped_lock lock{mutex};
+    if (!layout) {
+      layout = g_device->create_pipeline_layout({nullptr, 0});
+      vertex = webgpu::compile_shader(rhi::ShaderStage::Vertex, ClearShader, "vs_main");
+      fragment = webgpu::compile_shader(rhi::ShaderStage::Fragment, ClearShader, "fs_main");
+    }
+  }
+  rhi::RenderPipelineDesc desc;
+  desc.layout = layout.get();
+  desc.vertex = &vertex;
+  desc.vertex_entry = "vs_main";
+  desc.fragment = &fragment;
+  desc.fragment_entry = "fs_main";
+  desc.color_format = g_graphicsConfig.surfaceFormat;
+  desc.color_write = (config.clearColor ? rhi::WriteR | rhi::WriteG | rhi::WriteB : 0) | (config.clearAlpha ? rhi::WriteA : 0);
+  desc.blend = true;
+  desc.blend_color = {rhi::BlendFactor::Constant, rhi::BlendFactor::Zero, rhi::BlendOp::Add};
+  desc.blend_alpha = desc.blend_color;
+  desc.depth_format = g_graphicsConfig.depthFormat;
+  desc.depth_write = config.clearDepth;
+  desc.depth_compare = rhi::Compare::Always;
+  desc.samples = config.msaaSamples;
+  return g_device->create_render_pipeline(desc);
 }
 
-@fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0);
-}
-)""";
-  const wgpu::ShaderModuleDescriptor moduleDescriptor{
-      .nextInChain = &sourceDescriptor,
-      .label = "EFB Clear Module",
-  };
-  auto module = g_device.CreateShaderModule(&moduleDescriptor);
-  constexpr wgpu::PipelineLayoutDescriptor layoutDescriptor{
-      .bindGroupLayoutCount = 0,
-      .bindGroupLayouts = nullptr,
-  };
-  auto pipelineLayout = g_device.CreatePipelineLayout(&layoutDescriptor);
-  constexpr wgpu::BlendState blendState{
-      .color =
-          wgpu::BlendComponent{
-              .operation = wgpu::BlendOperation::Add,
-              .srcFactor = wgpu::BlendFactor::Constant,
-              .dstFactor = wgpu::BlendFactor::Zero,
-          },
-      .alpha =
-          wgpu::BlendComponent{
-              .operation = wgpu::BlendOperation::Add,
-              .srcFactor = wgpu::BlendFactor::Constant,
-              .dstFactor = wgpu::BlendFactor::Zero,
-          },
-  };
-  const wgpu::ColorTargetState colorTarget{
-      .format = g_graphicsConfig.surfaceConfiguration.format,
-      .blend = &blendState,
-      .writeMask = clear_write_mask(config.clearColor, config.clearAlpha),
-  };
-  const wgpu::FragmentState fragmentState{
-      .module = module,
-      .entryPoint = "fs_main",
-      .targetCount = 1,
-      .targets = &colorTarget,
-  };
-  const wgpu::DepthStencilState depthStencil{
-      .format = g_graphicsConfig.depthFormat,
-      .depthWriteEnabled = config.clearDepth,
-      .depthCompare = wgpu::CompareFunction::Always,
-  };
-  const auto label = fmt::format("EFB Clear Pipeline (color {}, alpha {}, depth {})", config.clearColor,
-                                 config.clearAlpha, config.clearDepth);
-  const wgpu::RenderPipelineDescriptor pipelineDescriptor{
-      .label = label.c_str(),
-      .layout = pipelineLayout,
-      .vertex =
-          wgpu::VertexState{
-              .module = module,
-              .entryPoint = "vs_main",
-          },
-      .primitive =
-          wgpu::PrimitiveState{
-              .topology = wgpu::PrimitiveTopology::TriangleList,
-          },
-      .depthStencil = &depthStencil,
-      .multisample =
-          wgpu::MultisampleState{
-              .count = config.msaaSamples,
-          },
-      .fragment = &fragmentState,
-  };
-  return g_device.CreateRenderPipeline(&pipelineDescriptor);
-}
-
-void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, const wgpu::Extent3D& targetSize) {
-  if (!bind_pipeline(data.pipeline, pass)) {
+void render(const DrawData& data, rhi::CommandList& list, const Extent3D& targetSize) {
+  if (!bind_pipeline(data.pipeline, list)) {
     return;
   }
-
-  pass.SetBlendConstant(&data.color);
-  pass.SetViewport(0.f, 0.f, static_cast<float>(targetSize.width), static_cast<float>(targetSize.height), data.depth,
-                   data.depth);
-  pass.SetScissorRect(data.rect.x, data.rect.y, data.rect.width, data.rect.height);
-  pass.Draw(3);
+  list.set_blend_constant(data.color.r, data.color.g, data.color.b, data.color.a);
+  list.set_viewport(0.f, 0.f, static_cast<float>(targetSize.width), static_cast<float>(targetSize.height), data.depth,
+                    data.depth);
+  list.set_scissor(data.rect.x, data.rect.y, data.rect.width, data.rect.height);
+  list.draw(3, 0);
 }
 } // namespace aurora::gfx::clear

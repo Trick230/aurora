@@ -18,23 +18,13 @@ function(aurora_copy_runtime_dlls target)
     )
   endforeach ()
 
-  # Copy DXC DLLs that Dawn loads via LoadLibrary at runtime
-  if (TARGET dawn::webgpu_dawn)
-    get_target_property(_dawn_loc dawn::webgpu_dawn IMPORTED_LOCATION)
-    if (NOT _dawn_loc)
-      get_target_property(_dawn_loc dawn::webgpu_dawn IMPORTED_LOCATION_RELEASE)
-    endif ()
-    if (_dawn_loc)
-      cmake_path(GET _dawn_loc PARENT_PATH _dawn_bin_dir)
-      foreach (_dll IN ITEMS dxcompiler.dll dxil.dll)
-        if (EXISTS "${_dawn_bin_dir}/${_dll}")
-          add_custom_command(TARGET ${target} POST_BUILD
-              COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dawn_bin_dir}/${_dll}" $<TARGET_FILE_DIR:${target}>
-          )
-        endif ()
-      endforeach ()
-    endif ()
-  endif ()
+  # The DXC DLLs the RHI loads at runtime
+  get_property(_rhi_files GLOBAL PROPERTY AURORA_RHI_RUNTIME_FILES)
+  foreach (_file IN LISTS _rhi_files)
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_file}" $<TARGET_FILE_DIR:${target}>
+    )
+  endforeach ()
 endfunction()
 
 # aurora_install_runtime_dlls(<executable_target> <install_destination>)

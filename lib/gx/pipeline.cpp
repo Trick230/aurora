@@ -24,15 +24,7 @@ DstAlphaMode dst_alpha_mode(const PipelineConfig& config) noexcept {
     };
     const bool needsSourceAlpha = config.colorUpdate && config.blendMode == GX_BM_BLEND &&
                                   (readsSourceAlpha(config.blendFacSrc) || readsSourceAlpha(config.blendFacDst));
-    dstAlphaMode = needsSourceAlpha && webgpu::g_dualSourceBlendingSupported ? DstAlphaMode::DualSource
-                                                                             : DstAlphaMode::Replace;
-    if (needsSourceAlpha && !webgpu::g_dualSourceBlendingSupported) {
-      static bool warned = false;
-      if (!warned) {
-        warned = true;
-        Log.warn("no dual source blending: blends under GXSetDstAlpha read source alpha 1");
-      }
-    }
+    dstAlphaMode = needsSourceAlpha ? DstAlphaMode::DualSource : DstAlphaMode::Replace;
   }
   return dstAlphaMode;
 }
@@ -68,46 +60,37 @@ static void dump_uber_hlsl(const char* dir) noexcept {
   }
 }
 
-wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+std::shared_ptr<rhi::RenderPipeline> create_pipeline(const PipelineConfig& config) {
   const auto dstAlphaMode = dst_alpha_mode(config);
   dump_hlsl(config, dstAlphaMode);
-  const auto shader = build_shader(config.shaderConfig, dstAlphaMode);
-  const auto label = fmt::format("GX Pipeline {:x} shader {:x}",
-                                 xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)),
-                                 xxh3_hash(config.shaderConfig));
-  return build_pipeline(config, dstAlphaMode, {}, shader, label.c_str());
+  const auto source = hlsl::build_shader_source(config.shaderConfig, dstAlphaMode);
+  const auto vertex = webgpu::compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
+  const auto fragment = webgpu::compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
+  return build_pipeline(config, dstAlphaMode, vertex, fragment);
 }
 
-template <typename Encoder>
-static void encode_draw(const DrawData& data, const Encoder& pass) {
+void render(const DrawData& data, rhi::CommandList& list) {
   if (data.cullMode == GX_CULL_ALL) {
     return;
   }
-  if (!gfx::bind_pipeline(data.pipeline, pass)) {
+  if (!gfx::bind_pipeline(data.pipeline, list)) {
     return;
   }
-
-  const std::array offsets{data.uniformRange.offset};
-  pass.SetBindGroup(1, *gfx::interp::g_vertexUniformBindGroup, offsets.size(), offsets.data());
+  gfx::bind_gx_groups(list);
+  const uint32_t offset = data.uniformRange.offset;
+  list.set_bind_group(1, *gfx::interp::g_vertexUniformBindGroup, &offset, 1);
   if (data.bindGroups.textureBindGroup) {
-    gfx::bind_texture_group(data.bindGroups.textureBindGroup, pass);
+    gfx::bind_texture_group(data.bindGroups.textureBindGroup, list);
   }
-  if constexpr (std::is_same_v<Encoder, wgpu::RenderPassEncoder>) {
-    if (data.dstAlpha != UINT32_MAX) {
-      const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
-      pass.SetBlendConstant(&color);
-    }
+  if (data.dstAlpha != UINT32_MAX) {
+    list.set_blend_constant(0.f, 0.f, 0.f, data.dstAlpha / 255.f);
   }
+  list.set_draw_constant(data.firstInstance);
   if (data.indexCount == 0) {
-    pass.Draw(data.vtxCount, data.instanceCount, 0, data.firstInstance);
+    list.draw(data.vtxCount, 0, data.instanceCount);
   } else {
-    gfx::bind_index_buffer(pass);
-    pass.DrawIndexed(data.indexCount, data.instanceCount, data.idxRange.offset / sizeof(uint16_t), 0,
-                     data.firstInstance);
+    gfx::bind_index_buffer(list);
+    list.draw_indexed(data.indexCount, data.idxRange.offset / sizeof(uint16_t), 0, data.instanceCount);
   }
 }
-
-void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) { encode_draw(data, pass); }
-
-void render(const DrawData& data, const wgpu::RenderBundleEncoder& bundle) { encode_draw(data, bundle); }
 } // namespace aurora::gx

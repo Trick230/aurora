@@ -62,7 +62,7 @@ struct DrawRecord {
 };
 
 // Encodes the retained frame's passes again into the encoder.
-using ReplayFn = std::function<void(wgpu::CommandEncoder&)>;
+using ReplayFn = std::function<void(rhi::CommandList&)>;
 // Submits a frame's own commands (its copies and side effects) and releases
 // its frame slot.
 using SubmitFn = std::function<void()>;
@@ -76,7 +76,7 @@ bool replaying() noexcept;
 
 // The vertex-stage uniform bind group draws bind: the frame's own, or the
 // blended copy during a replay.
-extern const wgpu::BindGroup* g_vertexUniformBindGroup;
+extern rhi::BindGroup* g_vertexUniformBindGroup;
 
 // Stops the replays and drops the frames held for them (submitting the
 // newest), as the render targets they draw into are about to be replaced.

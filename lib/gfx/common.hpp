@@ -14,7 +14,6 @@
 #include <aurora/gfx.h>
 #include <aurora/math.hpp>
 #include <dolphin/gx/GXEnum.h>
-#include <webgpu/webgpu_cpp.h>
 #define XXH_STATIC_LINKING_ONLY
 #include <xxhash.h>
 
@@ -198,14 +197,9 @@ extern AuroraStats g_stats;
 extern uint32_t g_drawCallCount;
 extern uint32_t g_mergedDrawCallCount;
 extern uint32_t g_droppedDrawCallCount;
-extern wgpu::Buffer g_vertexBuffer;
-extern wgpu::Buffer g_uniformBuffer;
-extern wgpu::Buffer g_indexBuffer;
-extern wgpu::Buffer g_storageBuffer;
-extern wgpu::BindGroupLayout g_staticBindGroupLayout;
-extern wgpu::BindGroup g_staticBindGroup;
-extern wgpu::BindGroupLayout g_uniformBindGroupLayout;
-extern wgpu::BindGroup g_uniformBindGroup;
+extern rhi::Buffer* g_uniformBuffer;
+extern rhi::BindGroupLayout* g_staticBindGroupLayout;
+extern rhi::BindGroupLayout* g_uniformBindGroupLayout;
 
 struct ClipRect {
   int32_t x;
@@ -219,9 +213,16 @@ struct ClipRect {
 
 using webgpu::Viewport;
 
+struct Extent3D {
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t depthOrArrayLayers = 1;
+};
+
 struct TextureRef;
 using TextureHandle = std::shared_ptr<TextureRef>;
-using EndFrameCallback = std::function<void(wgpu::CommandEncoder&)>;
+// Ends and submits the frame's list, presents, and gives the submission's ticket.
+using EndFrameCallback = std::function<uint64_t(rhi::CommandList&)>;
 
 enum class ShaderType : uint8_t {
   Clear = 0,
@@ -236,7 +237,6 @@ bool begin_frame();
 void finish();
 void end_frame(EndFrameCallback callback);
 uint32_t current_frame() noexcept;
-void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void gpu_synchronize();
 // Ends the pass with a copy of rect into texture (opaqueAlpha: the EFB keeps no
 // alpha, so the copy reads 1), then clears rect of what the flags say.
@@ -278,17 +278,21 @@ PipelineRef pipeline_ref(const PipelineConfig& config);
 PipelineRef uber_pipeline_ref(const gx::PipelineConfig& config);
 // Whether a draw with this pipeline will draw.
 bool pipeline_ready(PipelineRef ref);
-bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
-bool bind_pipeline(PipelineRef ref, const wgpu::RenderBundleEncoder& bundle);
-
-BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor);
-void bind_texture_group(BindGroupRef id, const wgpu::RenderPassEncoder& pass);
-void bind_texture_group(BindGroupRef id, const wgpu::RenderBundleEncoder& bundle);
+bool bind_pipeline(PipelineRef ref, rhi::CommandList& list);
+// GX's textures and samplers, kept alive with the bind group made of them. Entries
+// without a texture take the given defaults.
+struct TextureBinding {
+  TextureHandle texture;
+  rhi::Sampler* sampler = nullptr;
+};
+BindGroupRef bind_group_ref(const TextureBinding* bindings, uint32_t count, rhi::BindGroupLayout* layout,
+                            rhi::TextureView* emptyView, rhi::Sampler* emptySampler);
+void bind_texture_group(BindGroupRef id, rhi::CommandList& list);
+// The groups every GX draw shares, after a pipeline with another layout.
+void bind_gx_groups(rhi::CommandList& list);
 // Binds the whole index buffer once per pass; draws index into it by firstIndex.
-void bind_index_buffer(const wgpu::RenderPassEncoder& pass);
-void bind_index_buffer(const wgpu::RenderBundleEncoder& bundle);
-
-wgpu::Sampler sampler_ref(const wgpu::SamplerDescriptor& descriptor);
+void bind_index_buffer(rhi::CommandList& list);
+rhi::Sampler* sampler_ref(const rhi::SamplerDesc& descriptor);
 
 uint32_t align_uniform(uint32_t value);
 

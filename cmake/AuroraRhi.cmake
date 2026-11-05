@@ -24,6 +24,7 @@ FetchContent_MakeAvailable(aurora_vulkan_headers aurora_volk aurora_vma aurora_d
 
 # DXC runs at run time, for the shaders generated then; these go next to the executable.
 set(AURORA_RHI_RUNTIME_FILES "${aurora_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "${aurora_dxc_SOURCE_DIR}/bin/x64/dxil.dll")
+set_property(GLOBAL PROPERTY AURORA_RHI_RUNTIME_FILES ${AURORA_RHI_RUNTIME_FILES})
 
 set(_aurora_rhi_dir "${CMAKE_CURRENT_LIST_DIR}/../lib/rhi")
 add_library(aurora_rhi STATIC

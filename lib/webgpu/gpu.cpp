@@ -2,17 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
+#include <SDL3/SDL.h>
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
-#include <magic_enum.hpp>
-#include <webgpu/webgpu_cpp.h>
 
 #include "../gfx/common.hpp"
 #include "../gfx/frame_interp.hpp"
@@ -20,207 +17,117 @@
 #include "../internal.hpp"
 #include "../window.hpp"
 
-#ifdef WEBGPU_DAWN
-#include "../dawn/BackendBinding.hpp"
-#include <dawn/native/DawnNative.h>
-#endif
-
 namespace aurora::webgpu {
 static Module Log("aurora::gpu");
 
-wgpu::Device g_device;
-wgpu::Queue g_queue;
-wgpu::Surface g_surface;
-wgpu::BackendType g_backendType;
+static std::unique_ptr<rhi::Device> s_device;
+static std::unique_ptr<rhi::Swapchain> s_surface;
+rhi::Device* g_device = nullptr;
+rhi::Swapchain* g_surface = nullptr;
 GraphicsConfig g_graphicsConfig;
 TextureWithSampler g_frameBuffer;
 TextureWithSampler g_frameBufferResolved;
 TextureWithSampler g_depthBuffer;
 
 // EFB -> XFB copy pipeline
-static wgpu::BindGroupLayout g_CopyBindGroupLayout;
-wgpu::RenderPipeline g_CopyPipeline;
-wgpu::BindGroup g_CopyBindGroup;
-static wgpu::BindGroupLayout g_ResampleBindGroupLayout;
-static wgpu::RenderPipeline g_ResamplePipeline;
-static wgpu::Buffer g_ResampleUniformBuffer;
+static std::unique_ptr<rhi::BindGroupLayout> g_CopyBindGroupLayout;
+static std::unique_ptr<rhi::PipelineLayout> g_CopyPipelineLayout;
+static std::unique_ptr<rhi::RenderPipeline> s_CopyPipeline;
+rhi::RenderPipeline* g_CopyPipeline = nullptr;
+static std::unique_ptr<rhi::BindGroupLayout> g_ResampleBindGroupLayout;
+static std::unique_ptr<rhi::PipelineLayout> g_ResamplePipelineLayout;
+static std::unique_ptr<rhi::RenderPipeline> g_ResamplePipeline;
+static std::unique_ptr<rhi::Buffer> g_ResampleUniformBuffer;
 static TextureWithSampler g_resampledFrameBuffer;
 
-static wgpu::Adapter g_adapter;
-wgpu::Instance g_instance;
-wgpu::AdapterInfo g_adapterInfo;
-static wgpu::SurfaceCapabilities g_surfaceCapabilities;
-bool g_hasCoreFeatures = false;
-bool g_bcTexturesSupported = false;
-bool g_astcTexturesSupported = false;
-bool g_textureComponentSwizzleSupported = false;
-bool g_dualSourceBlendingSupported = false;
-static std::atomic_bool g_initialized = false;
-
 namespace {
-
-AuroraLogLevel wgpu_log_level(wgpu::LoggingType type) {
-  switch (type) {
-  case wgpu::LoggingType::Verbose:
-    return LOG_DEBUG;
-  case wgpu::LoggingType::Info:
-    return LOG_INFO;
-  case wgpu::LoggingType::Warning:
-    return LOG_WARNING;
-  case wgpu::LoggingType::Error:
-    return LOG_ERROR;
-  default:
-    return LOG_FATAL;
-  }
-}
-
-void wgpu_log(wgpu::LoggingType type, wgpu::StringView message) {
-  Log.report(wgpu_log_level(type), "WebGPU message: {}", message);
-}
-
 struct ResampleUniformBlock {
   uint32_t samplerMode = 0;
   float frameWidth = 0.f;
   float frameHeight = 0.f;
 };
+// More than frames can be in flight: each present takes the next slot.
+constexpr uint32_t ResampleUniformStride = 256;
+constexpr uint32_t ResampleUniformSlots = 8;
 
-constexpr std::string_view resampleShaderSource = R"(
-struct Uniforms {
-    sampler_mode: u32,
-    frame_width: f32,
-    frame_height: f32,
-};
-
+constexpr const char* FullscreenVertex = R"(
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
+    float4 pos : SV_Position;
+    float2 uv : TEXCOORD0;
 };
+static const float2 positions[3] = {float2(-1.0, 1.0), float2(-1.0, -3.0), float2(3.0, 1.0)};
+static const float2 uvs[3] = {float2(0.0, 0.0), float2(0.0, 2.0), float2(2.0, 0.0)};
+VertexOutput vs_main(uint vtxIdx : SV_VertexID) {
+    VertexOutput output;
+    output.pos = float4(positions[vtxIdx], 0.0, 1.0);
+    output.uv = uvs[vtxIdx];
+    return output;
+}
+)";
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var s: sampler;
-@group(0) @binding(2) var t: texture_2d<f32>;
+constexpr const char* CopyShader = R"(
+SamplerState efb_sampler : register(s0, space0);
+Texture2D efb_texture : register(t1, space0);
+float4 fs_main(VertexOutput input) : SV_Target {
+    return float4(efb_texture.Sample(efb_sampler, input.uv).rgb, 1.0);
+}
+)";
 
-var<private> pos: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(-1.0, 1.0),
-    vec2(-1.0, -3.0),
-    vec2(3.0, 1.0),
-);
-var<private> uvs: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(0.0, 0.0),
-    vec2(0.0, 2.0),
-    vec2(2.0, 0.0),
-);
+constexpr const char* ResampleShader = R"(
+struct Uniforms {
+    uint sampler_mode;
+    float frame_width;
+    float frame_height;
+};
+ConstantBuffer<Uniforms> uniforms : register(b0, space0);
+SamplerState s : register(s1, space0);
+Texture2D t : register(t2, space0);
 
-@vertex
-fn vs_main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(pos[vtxIdx], 0.0, 1.0);
-    out.uv = uvs[vtxIdx];
-    return out;
+float4 sample_by_pixel(int2 pixel) {
+    uint width, height;
+    t.GetDimensions(width, height);
+    int2 coord = clamp(pixel, int2(0, 0), int2(width, height) - int2(1, 1));
+    return t.Load(int3(coord, 0));
 }
 
-// BEGIN AREA SAMPLER REGION
+float4 sample_area(float4 frag_position) {
+    uint width, height;
+    t.GetDimensions(width, height);
+    float2 source_size = float2(width, height);
+    float2 target_size = max(float2(uniforms.frame_width, uniforms.frame_height), float2(1.0, 1.0));
 
-fn sample_by_pixel(pixel: vec2<i32>) -> vec4<f32> {
-    let source_dims = textureDimensions(t);
-    let max_coord = vec2<i32>(source_dims) - vec2<i32>(1, 1);
-    let coord = clamp(pixel, vec2<i32>(0, 0), max_coord);
-    return textureLoad(t, coord, 0);
-}
+    float2 source_min = clamp((frag_position.xy - float2(0.5, 0.5)) / target_size, float2(0.0, 0.0), float2(1.0, 1.0)) * source_size;
+    float2 source_max = clamp((frag_position.xy + float2(0.5, 0.5)) / target_size, float2(0.0, 0.0), float2(1.0, 1.0)) * source_size;
 
-fn sample_area(frag_position: vec4<f32>) -> vec4<f32> {
-    let source_size = vec2<f32>(textureDimensions(t));
-    let target_size = max(vec2<f32>(uniforms.frame_width, uniforms.frame_height), vec2<f32>(1.0, 1.0));
-
-    let source_min = clamp((frag_position.xy - vec2<f32>(0.5, 0.5)) / target_size,
-                           vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0)) * source_size;
-    let source_max = clamp((frag_position.xy + vec2<f32>(0.5, 0.5)) / target_size,
-                           vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0)) * source_size;
-
-    let first_pixel = vec2<i32>(floor(source_min));
-    let last_pixel = vec2<i32>(ceil(source_max));
+    int2 first_pixel = int2(floor(source_min));
+    int2 last_pixel = int2(ceil(source_max));
     // Only the pixels the footprint covers (at most 16 a side).
-    let end_pixel = min(last_pixel, first_pixel + vec2<i32>(16, 16));
+    int2 end_pixel = min(last_pixel, first_pixel + int2(16, 16));
 
-    var avg_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    var total_weight = 0.0;
-
-    for (var source_y: i32 = first_pixel.y; source_y < end_pixel.y; source_y = source_y + 1) {
-        let y0 = f32(source_y);
-        let weight_y = max(min(source_max.y, y0 + 1.0) - max(source_min.y, y0), 0.0);
-        for (var source_x: i32 = first_pixel.x; source_x < end_pixel.x; source_x = source_x + 1) {
-            let x0 = f32(source_x);
-            let weight_x = max(min(source_max.x, x0 + 1.0) - max(source_min.x, x0), 0.0);
-            let weight = weight_x * weight_y;
-            avg_color += weight * sample_by_pixel(vec2<i32>(source_x, source_y));
+    float4 avg_color = float4(0.0, 0.0, 0.0, 0.0);
+    float total_weight = 0.0;
+    for (int source_y = first_pixel.y; source_y < end_pixel.y; source_y++) {
+        float y0 = float(source_y);
+        float weight_y = max(min(source_max.y, y0 + 1.0) - max(source_min.y, y0), 0.0);
+        for (int source_x = first_pixel.x; source_x < end_pixel.x; source_x++) {
+            float x0 = float(source_x);
+            float weight_x = max(min(source_max.x, x0 + 1.0) - max(source_min.x, x0), 0.0);
+            float weight = weight_x * weight_y;
+            avg_color += weight * sample_by_pixel(int2(source_x, source_y));
             total_weight += weight;
         }
     }
-
     return avg_color / max(total_weight, 0.000001);
 }
 
-// END AREA SAMPLER REGION
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    var color = textureSample(t, s, in.uv);
+float4 fs_main(VertexOutput input) : SV_Target {
+    float4 color = t.Sample(s, input.uv);
     if (uniforms.sampler_mode == 1u) {
-        color = sample_area(in.position);
+        color = sample_area(input.pos);
     }
-    return vec4(color.rgb, 1.0);
+    return float4(color.rgb, 1.0);
 }
-)"sv;
-
-wgpu::PresentMode best_present_mode(bool vsync) {
-  const auto supports = [](const wgpu::PresentMode candidate) {
-    for (size_t i = 0; i < g_surfaceCapabilities.presentModeCount; ++i) {
-      if (g_surfaceCapabilities.presentModes[i] == candidate) {
-        return true;
-      }
-    }
-    return false;
-  };
-  if (vsync) {
-    // Relaxed FIFO tears a late frame in rather than wait; frame
-    // interpolation presents back to back, so any late one would tear.
-    if (!g_config.frameInterpolation && supports(wgpu::PresentMode::FifoRelaxed)) {
-      return wgpu::PresentMode::FifoRelaxed;
-    }
-  } else {
-    // Dawn only disables CAMetalLayer displaySyncEnabled for Immediate on Metal
-    if (g_backendType != wgpu::BackendType::Metal && supports(wgpu::PresentMode::Mailbox)) {
-      return wgpu::PresentMode::Mailbox;
-    }
-    if (supports(wgpu::PresentMode::Immediate)) {
-      return wgpu::PresentMode::Immediate;
-    }
-  }
-  return wgpu::PresentMode::Fifo;
-}
-
-wgpu::TextureFormat to_linear(wgpu::TextureFormat format) {
-  if (format == wgpu::TextureFormat::RGBA8UnormSrgb) {
-    return wgpu::TextureFormat::RGBA8Unorm;
-  }
-  if (format == wgpu::TextureFormat::BGRA8UnormSrgb) {
-    return wgpu::TextureFormat::BGRA8Unorm;
-  }
-  return format;
-}
-
-wgpu::TextureFormat best_surface_format() {
-  if (g_surfaceCapabilities.formatCount == 0) {
-    return wgpu::TextureFormat::Undefined;
-  }
-  for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i) {
-    const auto format = to_linear(g_surfaceCapabilities.formats[i]);
-    if (format == wgpu::TextureFormat::RGBA8Unorm || format == wgpu::TextureFormat::BGRA8Unorm) {
-      return format;
-    }
-  }
-  return g_surfaceCapabilities.formats[0];
-}
+)";
 
 uint32_t sampler_mode(AuroraSampler sampler) noexcept {
   switch (sampler) {
@@ -236,61 +143,82 @@ uint32_t viewport_extent(float value) noexcept {
   return std::max(1u, static_cast<uint32_t>(std::lround(std::max(value, 1.f))));
 }
 
+rhi::PresentMode best_present_mode(bool vsync) { return vsync ? rhi::PresentMode::Fifo : rhi::PresentMode::Mailbox; }
+
+std::shared_ptr<rhi::Sampler> create_clamped_sampler() {
+  rhi::SamplerDesc desc;
+  desc.u = rhi::AddressMode::ClampToEdge;
+  desc.v = rhi::AddressMode::ClampToEdge;
+  return g_device->create_sampler(desc);
+}
+
+std::unique_ptr<rhi::RenderPipeline> create_present_pipeline(rhi::PipelineLayout* layout, const char* shader) {
+  const std::string source = std::string{FullscreenVertex} + shader;
+  const auto vertex = compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
+  const auto fragment = compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
+  rhi::RenderPipelineDesc desc;
+  desc.layout = layout;
+  desc.vertex = &vertex;
+  desc.vertex_entry = "vs_main";
+  desc.fragment = &fragment;
+  desc.fragment_entry = "fs_main";
+  desc.color_format = g_graphicsConfig.surfaceFormat;
+  return g_device->create_render_pipeline(desc);
+}
+
+void create_copy_pipeline() {
+  const std::array entries{
+      rhi::BindingLayout{0, rhi::BindingKind::Sampler},
+      rhi::BindingLayout{1, rhi::BindingKind::Texture},
+  };
+  g_CopyBindGroupLayout = g_device->create_bind_group_layout({entries.data(), entries.size()});
+  rhi::BindGroupLayout* groups[] = {g_CopyBindGroupLayout.get()};
+  g_CopyPipelineLayout = g_device->create_pipeline_layout({groups, 1});
+  s_CopyPipeline = create_present_pipeline(g_CopyPipelineLayout.get(), CopyShader);
+  g_CopyPipeline = s_CopyPipeline.get();
+}
+
+void create_resample_pipeline() {
+  rhi::BindingLayout uniform{0, rhi::BindingKind::Uniform};
+  uniform.dynamic_offset = true;
+  const std::array entries{
+      uniform,
+      rhi::BindingLayout{1, rhi::BindingKind::Sampler},
+      rhi::BindingLayout{2, rhi::BindingKind::Texture},
+  };
+  g_ResampleBindGroupLayout = g_device->create_bind_group_layout({entries.data(), entries.size()});
+  rhi::BindGroupLayout* groups[] = {g_ResampleBindGroupLayout.get()};
+  g_ResamplePipelineLayout = g_device->create_pipeline_layout({groups, 1});
+  g_ResamplePipeline = create_present_pipeline(g_ResamplePipelineLayout.get(), ResampleShader);
+  g_ResampleUniformBuffer =
+      g_device->create_buffer({ResampleUniformStride * ResampleUniformSlots, rhi::MemoryKind::Upload});
+}
 } // namespace
 
+rhi::ShaderCode compile_shader(rhi::ShaderStage stage, const std::string& source, const char* entry) {
+  rhi::ShaderCode code;
+  std::string error;
+  if (!rhi::compile_shader(g_device->backend(), stage, source, entry, &code, &error)) {
+    FATAL("Shader {} doesn't compile: {}\n{}", entry, error, source);
+  }
+  return code;
+}
+
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled) {
-  const wgpu::Extent3D size{
-      .width = width,
-      .height = height,
-      .depthOrArrayLayers = 1,
-  };
-  const auto format = g_graphicsConfig.surfaceConfiguration.format;
-  uint32_t sampleCount = 1;
-  if (multisampled) {
-    sampleCount = g_graphicsConfig.msaaSamples;
-  }
   if (width == 0 || height == 0) {
-    Log.fatal("Invalid render texture size! {}x{}, multisampled {}, format {}", width, height,
-              static_cast<uint32_t>(format), multisampled);
+    Log.fatal("Invalid render texture size! {}x{}, multisampled {}", width, height, multisampled);
   }
-  const wgpu::TextureDescriptor textureDescriptor{
-      .label = "Render texture",
-      .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc |
-               wgpu::TextureUsage::CopyDst,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = format,
-      .mipLevelCount = 1,
-      .sampleCount = sampleCount,
-  };
-  auto texture = g_device.CreateTexture(&textureDescriptor);
-
-  constexpr wgpu::TextureViewDescriptor viewDescriptor{
-      .label = "Render texture view",
-      .dimension = wgpu::TextureViewDimension::e2D,
-  };
-  auto view = texture.CreateView(&viewDescriptor);
-
-  constexpr wgpu::SamplerDescriptor samplerDescriptor{
-      .label = "Render sampler",
-      .addressModeU = wgpu::AddressMode::ClampToEdge,
-      .addressModeV = wgpu::AddressMode::ClampToEdge,
-      .addressModeW = wgpu::AddressMode::ClampToEdge,
-      .magFilter = wgpu::FilterMode::Linear,
-      .minFilter = wgpu::FilterMode::Linear,
-      .mipmapFilter = wgpu::MipmapFilterMode::Linear,
-      .lodMinClamp = 0.f,
-      .lodMaxClamp = 1000.f,
-      .maxAnisotropy = 1,
-  };
-  auto sampler = g_device.CreateSampler(&samplerDescriptor);
-
+  const auto format = g_graphicsConfig.surfaceFormat;
+  auto texture = std::shared_ptr<rhi::Texture>{g_device->create_texture(
+      {width, height, 1, multisampled ? g_graphicsConfig.msaaSamples : 1, format,
+       rhi::TextureSampled | rhi::TextureColorTarget})};
+  std::shared_ptr<rhi::TextureView> view = texture->create_view({});
   return {
       .texture = std::move(texture),
       .view = std::move(view),
-      .size = size,
+      .size = {width, height},
       .format = format,
-      .sampler = std::move(sampler),
+      .sampler = create_clamped_sampler(),
   };
 }
 
@@ -327,261 +255,29 @@ Viewport calculate_present_viewport(uint32_t surface_width, uint32_t surface_hei
 }
 
 static TextureWithSampler create_depth_texture(uint32_t width, uint32_t height) {
-  const wgpu::Extent3D size{
-      .width = width,
-      .height = height,
-      .depthOrArrayLayers = 1,
-  };
   const auto format = g_graphicsConfig.depthFormat;
-  const wgpu::TextureDescriptor textureDescriptor{
-      .label = "Depth texture",
-      .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = format,
-      .mipLevelCount = 1,
-      .sampleCount = g_graphicsConfig.msaaSamples,
-  };
-  auto texture = g_device.CreateTexture(&textureDescriptor);
-
-  const wgpu::TextureViewDescriptor viewDescriptor{
-      .label = "Depth texture view",
-      .dimension = wgpu::TextureViewDimension::e2D,
-  };
-  auto view = texture.CreateView(&viewDescriptor);
-
-  const wgpu::SamplerDescriptor samplerDescriptor{
-      .label = "Depth sampler",
-      .addressModeU = wgpu::AddressMode::ClampToEdge,
-      .addressModeV = wgpu::AddressMode::ClampToEdge,
-      .addressModeW = wgpu::AddressMode::ClampToEdge,
-      .magFilter = wgpu::FilterMode::Linear,
-      .minFilter = wgpu::FilterMode::Linear,
-      .mipmapFilter = wgpu::MipmapFilterMode::Linear,
-      .lodMinClamp = 0.f,
-      .lodMaxClamp = 1000.f,
-      .maxAnisotropy = 1,
-  };
-  auto sampler = g_device.CreateSampler(&samplerDescriptor);
-
+  auto texture = std::shared_ptr<rhi::Texture>{g_device->create_texture(
+      {width, height, 1, g_graphicsConfig.msaaSamples, format, rhi::TextureSampled | rhi::TextureDepthTarget})};
+  std::shared_ptr<rhi::TextureView> view = texture->create_view({});
   return {
       .texture = std::move(texture),
       .view = std::move(view),
-      .size = size,
+      .size = {width, height},
       .format = format,
-      .sampler = std::move(sampler),
+      .sampler = create_clamped_sampler(),
   };
 }
 
-void create_copy_pipeline() {
-  wgpu::ShaderSourceWGSL sourceDescriptor{};
-  sourceDescriptor.code = R"""(
-@group(0) @binding(0)
-var efb_sampler: sampler;
-@group(0) @binding(1)
-var efb_texture: texture_2d<f32>;
-
-struct VertexOutput {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-var<private> pos: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(-1.0, 1.0),
-    vec2(-1.0, -3.0),
-    vec2(3.0, 1.0),
-);
-var<private> uvs: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(0.0, 0.0),
-    vec2(0.0, 2.0),
-    vec2(2.0, 0.0),
-);
-
-@vertex
-fn vs_main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
-    var out: VertexOutput;
-    out.pos = vec4<f32>(pos[vtxIdx], 0.0, 1.0);
-    out.uv = uvs[vtxIdx];
-    return out;
+std::unique_ptr<rhi::BindGroup> create_copy_bind_group(const TextureWithSampler& source) {
+  std::array<rhi::BindingValue, 2> entries{};
+  entries[0].binding = 0;
+  entries[0].sampler = source.sampler.get();
+  entries[1].binding = 1;
+  entries[1].view = source.view.get();
+  return g_device->create_bind_group({g_CopyBindGroupLayout.get(), entries.data(), entries.size()});
 }
 
-@fragment
-fn fs_opaque(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = textureSample(efb_texture, efb_sampler, in.uv);
-    return vec4(color.rgb, 1.0);
-}
-)""";
-  const wgpu::ShaderModuleDescriptor moduleDescriptor{
-      .nextInChain = &sourceDescriptor,
-      .label = "XFB Copy Module",
-  };
-  auto module = g_device.CreateShaderModule(&moduleDescriptor);
-  const std::array bindGroupLayoutEntries{
-      wgpu::BindGroupLayoutEntry{
-          .binding = 0,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .sampler =
-              wgpu::SamplerBindingLayout{
-                  .type = wgpu::SamplerBindingType::Filtering,
-              },
-      },
-      wgpu::BindGroupLayoutEntry{
-          .binding = 1,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .texture =
-              wgpu::TextureBindingLayout{
-                  .sampleType = wgpu::TextureSampleType::Float,
-                  .viewDimension = wgpu::TextureViewDimension::e2D,
-              },
-      },
-  };
-  const wgpu::BindGroupLayoutDescriptor bindGroupLayoutDescriptor{
-      .entryCount = bindGroupLayoutEntries.size(),
-      .entries = bindGroupLayoutEntries.data(),
-  };
-  g_CopyBindGroupLayout = g_device.CreateBindGroupLayout(&bindGroupLayoutDescriptor);
-  const wgpu::PipelineLayoutDescriptor layoutDescriptor{
-      .bindGroupLayoutCount = 1,
-      .bindGroupLayouts = &g_CopyBindGroupLayout,
-  };
-  auto pipelineLayout = g_device.CreatePipelineLayout(&layoutDescriptor);
-
-  const std::array colorTargets{wgpu::ColorTargetState{
-      .format = g_graphicsConfig.surfaceConfiguration.format,
-      .writeMask = wgpu::ColorWriteMask::All,
-  }};
-  const wgpu::FragmentState fragmentState{
-      .module = module,
-      .entryPoint = "fs_opaque",
-      .targetCount = colorTargets.size(),
-      .targets = colorTargets.data(),
-  };
-  const wgpu::RenderPipelineDescriptor pipelineDescriptor{
-      .label = "XFB Copy Pipeline",
-      .layout = pipelineLayout,
-      .vertex =
-          wgpu::VertexState{
-              .module = module,
-              .entryPoint = "vs_main",
-          },
-      .primitive =
-          wgpu::PrimitiveState{
-              .topology = wgpu::PrimitiveTopology::TriangleList,
-          },
-      .multisample =
-          wgpu::MultisampleState{
-              .count = 1,
-              .mask = UINT32_MAX,
-          },
-      .fragment = &fragmentState,
-  };
-  g_CopyPipeline = g_device.CreateRenderPipeline(&pipelineDescriptor);
-}
-
-void create_resample_pipeline() {
-  wgpu::ShaderSourceWGSL sourceDescriptor{};
-  sourceDescriptor.code = resampleShaderSource;
-  const wgpu::ShaderModuleDescriptor moduleDescriptor{
-      .nextInChain = &sourceDescriptor,
-      .label = "Present Resample Module",
-  };
-  auto module = g_device.CreateShaderModule(&moduleDescriptor);
-  const std::array colorTargets{wgpu::ColorTargetState{
-      .format = g_graphicsConfig.surfaceConfiguration.format,
-      .writeMask = wgpu::ColorWriteMask::All,
-  }};
-  const wgpu::FragmentState fragmentState{
-      .module = module,
-      .entryPoint = "fs_main",
-      .targetCount = colorTargets.size(),
-      .targets = colorTargets.data(),
-  };
-  const std::array bindGroupLayoutEntries{
-      wgpu::BindGroupLayoutEntry{
-          .binding = 0,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .buffer =
-              wgpu::BufferBindingLayout{
-                  .type = wgpu::BufferBindingType::Uniform,
-              },
-      },
-      wgpu::BindGroupLayoutEntry{
-          .binding = 1,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .sampler =
-              wgpu::SamplerBindingLayout{
-                  .type = wgpu::SamplerBindingType::Filtering,
-              },
-      },
-      wgpu::BindGroupLayoutEntry{
-          .binding = 2,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .texture =
-              wgpu::TextureBindingLayout{
-                  .sampleType = wgpu::TextureSampleType::Float,
-                  .viewDimension = wgpu::TextureViewDimension::e2D,
-              },
-      },
-  };
-  const wgpu::BindGroupLayoutDescriptor bindGroupLayoutDescriptor{
-      .entryCount = bindGroupLayoutEntries.size(),
-      .entries = bindGroupLayoutEntries.data(),
-  };
-  g_ResampleBindGroupLayout = g_device.CreateBindGroupLayout(&bindGroupLayoutDescriptor);
-  const wgpu::PipelineLayoutDescriptor layoutDescriptor{
-      .bindGroupLayoutCount = 1,
-      .bindGroupLayouts = &g_ResampleBindGroupLayout,
-  };
-  auto pipelineLayout = g_device.CreatePipelineLayout(&layoutDescriptor);
-  const wgpu::RenderPipelineDescriptor pipelineDescriptor{
-      .label = "Present Resample Pipeline",
-      .layout = pipelineLayout,
-      .vertex =
-          wgpu::VertexState{
-              .module = module,
-              .entryPoint = "vs_main",
-          },
-      .primitive =
-          wgpu::PrimitiveState{
-              .topology = wgpu::PrimitiveTopology::TriangleList,
-          },
-      .multisample =
-          wgpu::MultisampleState{
-              .count = 1,
-              .mask = UINT32_MAX,
-          },
-      .fragment = &fragmentState,
-  };
-  g_ResamplePipeline = g_device.CreateRenderPipeline(&pipelineDescriptor);
-
-  const wgpu::BufferDescriptor uniformBufferDescriptor{
-      .label = "Present Resample Uniform Buffer",
-      .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::Uniform,
-      .size = AURORA_ALIGN(sizeof(ResampleUniformBlock), 16),
-  };
-  g_ResampleUniformBuffer = g_device.CreateBuffer(&uniformBufferDescriptor);
-}
-
-wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
-  const std::array bindGroupEntries{
-      wgpu::BindGroupEntry{
-          .binding = 0,
-          .sampler = source.sampler,
-      },
-      wgpu::BindGroupEntry{
-          .binding = 1,
-          .textureView = source.view,
-      },
-  };
-  const wgpu::BindGroupDescriptor bindGroupDescriptor{
-      .layout = g_CopyBindGroupLayout,
-      .entryCount = bindGroupEntries.size(),
-      .entries = bindGroupEntries.data(),
-  };
-  return g_device.CreateBindGroup(&bindGroupDescriptor);
-}
-
-const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport) {
+const TextureWithSampler& resample_present_source(rhi::CommandList& list, const Viewport& viewport) {
   const auto& source = present_source();
   const uint32_t width = viewport_extent(viewport.width);
   const uint32_t height = viewport_extent(viewport.height);
@@ -602,423 +298,135 @@ const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& en
       .frameWidth = static_cast<float>(width),
       .frameHeight = static_cast<float>(height),
   };
-  ASSERT(gfx::render_worker::is_worker_thread(), "Present resample queue write must run on the render worker");
-  g_queue.WriteBuffer(g_ResampleUniformBuffer, 0, &uniform, sizeof(uniform));
+  ASSERT(gfx::render_worker::is_worker_thread(), "Present resample must run on the render worker");
+  static uint32_t slot = 0;
+  slot = (slot + 1) % ResampleUniformSlots;
+  const uint32_t offset = slot * ResampleUniformStride;
+  std::memcpy(static_cast<uint8_t*>(g_ResampleUniformBuffer->mapped()) + offset, &uniform, sizeof(uniform));
 
-  const std::array bindGroupEntries{
-      wgpu::BindGroupEntry{
-          .binding = 0,
-          .buffer = g_ResampleUniformBuffer,
-          .size = AURORA_ALIGN(sizeof(ResampleUniformBlock), 16),
-      },
-      wgpu::BindGroupEntry{
-          .binding = 1,
-          .sampler = source.sampler,
-      },
-      wgpu::BindGroupEntry{
-          .binding = 2,
-          .textureView = source.view,
-      },
-  };
-  const wgpu::BindGroupDescriptor bindGroupDescriptor{
-      .layout = g_ResampleBindGroupLayout,
-      .entryCount = bindGroupEntries.size(),
-      .entries = bindGroupEntries.data(),
-  };
-  const auto bindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+  std::array<rhi::BindingValue, 3> entries{};
+  entries[0].binding = 0;
+  entries[0].buffer = g_ResampleUniformBuffer.get();
+  entries[0].size = ResampleUniformStride;
+  entries[1].binding = 1;
+  entries[1].sampler = source.sampler.get();
+  entries[2].binding = 2;
+  entries[2].view = source.view.get();
+  const auto bindGroup = g_device->create_bind_group({g_ResampleBindGroupLayout.get(), entries.data(), entries.size()});
 
-  const std::array attachments{
-      wgpu::RenderPassColorAttachment{
-          .view = g_resampledFrameBuffer.view,
-          .loadOp = wgpu::LoadOp::Clear,
-          .storeOp = wgpu::StoreOp::Store,
-      },
-  };
-  const wgpu::RenderPassDescriptor renderPassDescriptor{
-      .label = "Present resample render pass",
-      .colorAttachmentCount = attachments.size(),
-      .colorAttachments = attachments.data(),
-  };
-  const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
-  pass.SetPipeline(g_ResamplePipeline);
-  pass.SetBindGroup(0, bindGroup, 0, nullptr);
-  pass.SetViewport(0.f, 0.f, static_cast<float>(width), static_cast<float>(height), 0.f, 1.f);
-  pass.Draw(3);
-  pass.End();
+  rhi::RenderPassDesc pass;
+  pass.color.target = g_resampledFrameBuffer.texture.get();
+  pass.color.clear = true;
+  list.begin_render_pass(pass);
+  list.set_pipeline(*g_ResamplePipeline);
+  list.set_bind_group(0, *bindGroup, &offset, 1);
+  list.draw(3, 0);
+  list.end_render_pass();
 
   return g_resampledFrameBuffer;
 }
 
-static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
-  switch (backend) {
-  case BACKEND_D3D12:
-    return wgpu::BackendType::D3D12;
-  case BACKEND_METAL:
-    return wgpu::BackendType::Metal;
-  case BACKEND_VULKAN:
-    return wgpu::BackendType::Vulkan;
-  default:
-    return wgpu::BackendType::Undefined;
-  }
-}
-
 static void release_surface_locked() noexcept {
-  if (g_surface) {
-    g_surface.Unconfigure();
-  }
-  g_surface = {};
+  g_surface = nullptr;
+  s_surface.reset();
 }
 
 static bool create_surface() {
-  SDL_Window* window = window::get_sdl_window();
-  if (window == nullptr) {
-    Log.error("Failed to create surface: no window");
-    return false;
-  }
-  const auto chainedDescriptor = utils::SetupWindowAndGetSurfaceDescriptor(window);
-  if (!chainedDescriptor) {
-    Log.error("Failed to create surface descriptor for current window");
-    return false;
-  }
-  const wgpu::SurfaceDescriptor surfaceDescriptor{
-      .nextInChain = chainedDescriptor.get(),
-      .label = "Surface",
-  };
   release_surface_locked();
-  g_surface = g_instance.CreateSurface(&surfaceDescriptor);
-  if (!g_surface) {
-    Log.error("Failed to create surface");
+  auto* window = window::get_sdl_window();
+  if (window == nullptr) {
+    return false;
+  }
+  const SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+  rhi::SwapchainDesc desc;
+  desc.window.window = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+  desc.window.instance = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, nullptr);
+  desc.width = g_graphicsConfig.surfaceWidth;
+  desc.height = g_graphicsConfig.surfaceHeight;
+  desc.format = g_graphicsConfig.surfaceFormat;
+  desc.mode = g_graphicsConfig.presentMode;
+  s_surface = g_device->create_swapchain(desc);
+  g_surface = s_surface.get();
+  if (g_surface == nullptr) {
+    Log.error("Failed to create the swapchain");
     return false;
   }
   return true;
 }
 
 bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
-  if (!g_instance) {
-    Log.info("Creating WebGPU instance");
-    const std::array requiredInstanceFeatures{
-        wgpu::InstanceFeatureName::TimedWaitAny,
-    };
-    wgpu::InstanceDescriptor instanceDescriptor{
-        .requiredFeatureCount = requiredInstanceFeatures.size(),
-        .requiredFeatures = requiredInstanceFeatures.data(),
-    };
-    // DawnInstanceDescriptor is C++ API whose constructor lives in the DLL; a
-    // MinGW build cannot link against the MSVC-built prebuilt. Its defaults
-    // (validation off) match, and device-level logging is set up below.
-#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
-    dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
-    dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
-    dawnInstanceDescriptor.SetLoggingCallback(wgpu_log);
-    instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
-#endif
-    g_instance = wgpu::CreateInstance(&instanceDescriptor);
-    if (!g_instance) {
-      Log.error("Failed to create WebGPU instance");
-      return false;
-    }
+  (void)allowCpu;
+  const rhi::Backend backend = auroraBackend == BACKEND_VULKAN ? rhi::Backend::Vulkan : rhi::Backend::D3D12;
+  rhi::DeviceOptions options;
+  options.validation = std::getenv("RHI_VALIDATION") != nullptr;
+  std::string error;
+  s_device = rhi::create_device(backend, options, &error);
+  if (!s_device) {
+    Log.error("Failed to create the device: {}", error);
+    return false;
   }
-  const wgpu::BackendType backend = to_wgpu_backend(auroraBackend);
-  Log.info("Attempting to initialize {}", magic_enum::enum_name(backend));
+  g_device = s_device.get();
+  Log.info("Graphics adapter: {} ({})", g_device->adapter_name(), backend == rhi::Backend::Vulkan ? "Vulkan" : "D3D12");
 
-  if (!create_surface()) {
-    return false;
-  }
-  {
-    const wgpu::RequestAdapterOptions options{
-        .featureLevel = wgpu::FeatureLevel::Compatibility,
-        .powerPreference = wgpu::PowerPreference::HighPerformance,
-        .backendType = backend,
-        .compatibleSurface = g_surface,
-    };
-    Log.info("Requesting adapter\n  Feature level: {}\n  Power preference: {}\n  Backend: {}\n  Compatible surface: {}",
-             magic_enum::enum_name(options.featureLevel), magic_enum::enum_name(options.powerPreference),
-             magic_enum::enum_name(options.backendType), static_cast<bool>(options.compatibleSurface));
-    bool requestAdapterCallbackCompleted = false;
-    wgpu::RequestAdapterStatus requestAdapterStatus = wgpu::RequestAdapterStatus::CallbackCancelled;
-    std::string requestAdapterMessage;
-    const auto future = g_instance.RequestAdapter(
-        &options, wgpu::CallbackMode::WaitAnyOnly,
-        [&](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
-          requestAdapterCallbackCompleted = true;
-          requestAdapterStatus = status;
-          requestAdapterMessage = std::string{std::string_view{message}};
-          if (status == wgpu::RequestAdapterStatus::Success) {
-            g_adapter = std::move(adapter);
-          } else {
-            Log.warn("Adapter request failed: {}: {}", magic_enum::enum_name(status), message);
-          }
-        });
-    const auto status = g_instance.WaitAny(future, 5000000000);
-    if (status != wgpu::WaitStatus::Success) {
-      if (requestAdapterCallbackCompleted) {
-        Log.error("Failed to create adapter: wait status {}, request status {}, message: {}",
-                  magic_enum::enum_name(status), magic_enum::enum_name(requestAdapterStatus), requestAdapterMessage);
-      } else {
-        Log.error("Failed to create adapter: wait status {}, request callback did not complete",
-                  magic_enum::enum_name(status));
-      }
-      return false;
-    }
-    if (!g_adapter) {
-      if (requestAdapterCallbackCompleted) {
-        Log.error("Failed to create adapter: request status {}, message: {}",
-                  magic_enum::enum_name(requestAdapterStatus), requestAdapterMessage);
-      } else {
-        Log.error("Failed to create adapter: request callback did not complete");
-      }
-      return false;
-    }
-  }
-  g_adapter.GetInfo(&g_adapterInfo);
-  auto adapterName = g_adapterInfo.device;
-  if (adapterName.IsUndefined()) {
-    adapterName = wgpu::StringView("Unknown");
-  }
-  if (!allowCpu && g_adapterInfo.adapterType == wgpu::AdapterType::CPU) {
-    Log.warn("Ignoring CPU adapter: {}", adapterName);
-    g_adapterInfo = {};
-    g_adapter = {};
-    return false;
-  }
-  auto description = g_adapterInfo.description;
-  if (description.IsUndefined()) {
-    description = wgpu::StringView("Unknown");
-  }
-  g_backendType = g_adapterInfo.backendType;
-  const auto backendName = magic_enum::enum_name(g_backendType);
-  Log.info("Graphics adapter information\n  API: {}\n  Device: {} ({})\n  Driver: {}", backendName, adapterName,
-           magic_enum::enum_name(g_adapterInfo.adapterType), description);
-
-  {
-    wgpu::Limits supportedLimits{};
-    g_adapter.GetLimits(&supportedLimits);
-    wgpu::CompatibilityModeLimits compatibilityModeLimits{wgpu::CompatibilityModeLimits::Init{
-        .maxStorageBuffersInVertexStage = 2,
-        .maxStorageBuffersInFragmentStage = 2,
-    }};
-    const wgpu::Limits requiredLimits{
-        .nextInChain = &compatibilityModeLimits,
-        // Use "best" supported limits
-        .maxTextureDimension1D = supportedLimits.maxTextureDimension1D == 0 ? WGPU_LIMIT_U32_UNDEFINED
-                                                                            : supportedLimits.maxTextureDimension1D,
-        .maxTextureDimension2D = supportedLimits.maxTextureDimension2D == 0 ? WGPU_LIMIT_U32_UNDEFINED
-                                                                            : supportedLimits.maxTextureDimension2D,
-        .maxTextureDimension3D = supportedLimits.maxTextureDimension3D == 0 ? WGPU_LIMIT_U32_UNDEFINED
-                                                                            : supportedLimits.maxTextureDimension3D,
-        .maxTextureArrayLayers = supportedLimits.maxTextureArrayLayers == 0 ? WGPU_LIMIT_U32_UNDEFINED
-                                                                            : supportedLimits.maxTextureArrayLayers,
-        .maxStorageBuffersPerShaderStage = 2,
-        .minUniformBufferOffsetAlignment =
-            supportedLimits.minUniformBufferOffsetAlignment < 64 ? 64 : supportedLimits.minUniformBufferOffsetAlignment,
-        .minStorageBufferOffsetAlignment =
-            supportedLimits.minStorageBufferOffsetAlignment < 16 ? 16 : supportedLimits.minStorageBufferOffsetAlignment,
-    };
-    Log.info(
-        "Using limits:"
-        "\n  maxTextureDimension1D: {}"
-        "\n  maxTextureDimension2D: {}"
-        "\n  maxTextureDimension3D: {}"
-        "\n  maxTextureArrayLayers: {}"
-        "\n  maxStorageBuffersPerShaderStage: {}"
-        "\n  minUniformBufferOffsetAlignment: {}"
-        "\n  minStorageBufferOffsetAlignment: {}",
-        requiredLimits.maxTextureDimension1D, requiredLimits.maxTextureDimension2D,
-        requiredLimits.maxTextureDimension3D, requiredLimits.maxTextureArrayLayers,
-        requiredLimits.maxStorageBuffersPerShaderStage, requiredLimits.minUniformBufferOffsetAlignment,
-        requiredLimits.minStorageBufferOffsetAlignment);
-    std::vector<wgpu::FeatureName> requiredFeatures;
-    g_hasCoreFeatures = false;
-    g_bcTexturesSupported = false;
-    g_astcTexturesSupported = false;
-    g_textureComponentSwizzleSupported = false;
-    g_dualSourceBlendingSupported = false;
-    wgpu::SupportedFeatures supportedFeatures;
-    g_adapter.GetFeatures(&supportedFeatures);
-    for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
-      const auto feature = supportedFeatures.features[i];
-      if (feature == wgpu::FeatureName::CoreFeaturesAndLimits || feature == wgpu::FeatureName::TextureCompressionBC ||
-          feature == wgpu::FeatureName::TextureCompressionASTC ||
-          feature == wgpu::FeatureName::TextureComponentSwizzle || feature == wgpu::FeatureName::DualSourceBlending ||
-          feature == wgpu::FeatureName::ImplicitDeviceSynchronization) {
-        if (feature == wgpu::FeatureName::CoreFeaturesAndLimits) {
-          g_hasCoreFeatures = true;
-        } else if (feature == wgpu::FeatureName::TextureCompressionBC) {
-          g_bcTexturesSupported = true;
-        } else if (feature == wgpu::FeatureName::TextureCompressionASTC) {
-          g_astcTexturesSupported = true;
-        } else if (feature == wgpu::FeatureName::TextureComponentSwizzle) {
-          g_textureComponentSwizzleSupported = true;
-        } else if (feature == wgpu::FeatureName::DualSourceBlending) {
-          g_dualSourceBlendingSupported = true;
-        }
-        requiredFeatures.push_back(feature);
-      }
-    }
-    std::string featureList;
-    for (auto featureName : requiredFeatures) {
-      featureList += "\n  ";
-      featureList += magic_enum::enum_name(featureName);
-    }
-    Log.info("Enabling features: {}", featureList);
-#ifdef WEBGPU_DAWN
-    wgpu::DawnCacheDeviceDescriptor cacheDescriptor({
-        .isolationKey = nullptr,
-        .loadDataFunction = load_from_cache,
-        .storeDataFunction = store_to_cache,
-        .functionUserdata = nullptr,
-    });
-
-    constexpr std::array enableToggles{
-#if _WIN32
-        "use_dxc",
-#ifndef NDEBUG
-        "emit_hlsl_debug_symbols",
-#endif
-#endif
-#ifdef NDEBUG
-        "skip_validation",
-        "disable_robustness",
-#endif
-        "use_user_defined_labels_in_backend",
-        "allow_unsafe_apis",
-        "disable_symbol_renaming",
-        "enable_immediate_error_handling",
-    };
-    constexpr std::array disableToggles{
-        "timestamp_quantization",
-    };
-    wgpu::DawnTogglesDescriptor togglesDescriptor(wgpu::DawnTogglesDescriptor::Init{
-        .nextInChain = &cacheDescriptor,
-        .enabledToggleCount = enableToggles.size(),
-        .enabledToggles = enableToggles.data(),
-        .disabledToggleCount = disableToggles.size(),
-        .disabledToggles = disableToggles.data(),
-    });
-#endif
-    wgpu::DeviceDescriptor deviceDescriptor({
-#ifdef WEBGPU_DAWN
-        .nextInChain = &togglesDescriptor,
-#endif
-        .requiredFeatureCount = requiredFeatures.size(),
-        .requiredFeatures = requiredFeatures.data(),
-        .requiredLimits = &requiredLimits,
-    });
-    deviceDescriptor.SetUncapturedErrorCallback(
-        [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
-          if (g_initialized) {
-            FATAL("WebGPU error {}: {}", underlying(type), message);
-          } else {
-            Log.warn("WebGPU error {}: {}", underlying(type), message);
-          }
-        });
-    deviceDescriptor.SetDeviceLostCallback(
-        wgpu::CallbackMode::AllowSpontaneous,
-        [](const wgpu::Device& device, wgpu::DeviceLostReason reason, wgpu::StringView message) {
-          if (reason == wgpu::DeviceLostReason::Destroyed) {
-            return;  // our own shutdown
-          }
-          if (g_initialized) {
-            FATAL("Device lost: {}", message);
-          } else {
-            Log.warn("Device lost: {}", message);
-          }
-        });
-    const auto future =
-        g_adapter.RequestDevice(&deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
-                                [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
-                                  if (status == wgpu::RequestDeviceStatus::Success) {
-                                    g_device = std::move(device);
-                                  } else {
-                                    Log.warn("Device request failed: {}", message);
-                                  }
-                                });
-    const auto status = g_instance.WaitAny(future, 5000000000);
-    if (status != wgpu::WaitStatus::Success) {
-      Log.error("Failed to create device: {}", magic_enum::enum_name(status));
-      return false;
-    }
-    if (!g_device) {
-      return false;
-    }
-    g_device.SetLoggingCallback(wgpu_log);
-  }
-  g_queue = g_device.GetQueue();
-
-  const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
-  if (status != wgpu::Status::Success) {
-    Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
-    return false;
-  }
-  if (g_surfaceCapabilities.formatCount == 0) {
-    Log.error("Surface has no formats");
-    return false;
-  }
-  if (g_surfaceCapabilities.presentModeCount == 0) {
-    Log.error("Surface has no present modes");
-    return false;
-  }
-  auto surfaceFormat = best_surface_format();
-  auto presentMode = best_present_mode(g_config.vsync);
-  Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
-           magic_enum::enum_name(presentMode));
   const auto size = window::get_window_size();
   g_graphicsConfig = GraphicsConfig{
-      .surfaceConfiguration =
-          wgpu::SurfaceConfiguration{
-              .format = surfaceFormat,
-              .usage = wgpu::TextureUsage::RenderAttachment,
-              .width = size.native_fb_width,
-              .height = size.native_fb_height,
-              .presentMode = presentMode,
-          },
-      .depthFormat = wgpu::TextureFormat::Depth32Float,
+      .surfaceFormat = rhi::Format::BGRA8Unorm,
+      .surfaceWidth = size.native_fb_width,
+      .surfaceHeight = size.native_fb_height,
+      .presentMode = best_present_mode(g_config.vsync),
+      .depthFormat = rhi::Format::Depth32Float,
       .msaaSamples = g_config.msaa,
       .textureAnisotropy = g_config.maxTextureAnisotropy,
   };
+  if (!create_surface()) {
+    return false;
+  }
   create_copy_pipeline();
   create_resample_pipeline();
   resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
-  g_initialized = true;
   return true;
 }
 
 void shutdown() {
-  g_initialized = false;
   gfx::gpu_synchronize();
-  g_CopyBindGroupLayout = {};
-  g_CopyPipeline = {};
-  g_CopyBindGroup = {};
-  g_ResampleBindGroupLayout = {};
-  g_ResamplePipeline = {};
-  g_ResampleUniformBuffer = {};
+  if (g_device != nullptr) {
+    g_device->wait_idle();
+  }
+  g_CopyPipeline = nullptr;
+  s_CopyPipeline.reset();
+  g_CopyPipelineLayout.reset();
+  g_CopyBindGroupLayout.reset();
+  g_ResamplePipeline.reset();
+  g_ResamplePipelineLayout.reset();
+  g_ResampleBindGroupLayout.reset();
+  g_ResampleUniformBuffer.reset();
   g_resampledFrameBuffer = {};
   g_frameBuffer = {};
   g_frameBufferResolved = {};
   g_depthBuffer = {};
-  g_queue = {};
-  g_surface = {};
-  g_device = {};
-  g_adapter = {};
-  g_instance = {};
-  cache_shutdown();
+  release_surface_locked();
+  // Stays for the process's last moments: textures in static state go away at exit,
+  // and retire with their device.
+  (void)s_device.release();
 }
 
 void release_surface() noexcept {
   gfx::gpu_synchronize();
-  {
-    release_surface_locked();
+  if (g_device != nullptr) {
+    g_device->wait_idle();
   }
+  release_surface_locked();
 }
 
 static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight,
                                       bool force) {
-  if (!g_surface || !g_device || width == 0 || height == 0 || nativeHeight == 0 || nativeWidth == 0) {
+  if (g_surface == nullptr || g_device == nullptr || width == 0 || height == 0 || nativeHeight == 0 ||
+      nativeWidth == 0) {
     return;
   }
-  const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != nativeWidth ||
-                           g_graphicsConfig.surfaceConfiguration.height != nativeHeight ||
-                           g_frameBuffer.size.width != width || g_frameBuffer.size.height != height;
+  const bool surfaceChanged =
+      g_graphicsConfig.surfaceWidth != nativeWidth || g_graphicsConfig.surfaceHeight != nativeHeight;
+  const bool sizeChanged = surfaceChanged || g_frameBuffer.size.width != width || g_frameBuffer.size.height != height;
   if (!force && !sizeChanged) {
     return;
   }
@@ -1027,35 +435,31 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
     gfx::interp::discard();
     gfx::clear_caches();
   }
-  g_graphicsConfig.surfaceConfiguration.width = nativeWidth;
-  g_graphicsConfig.surfaceConfiguration.height = nativeHeight;
-  auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
-  surfaceConfiguration.device = g_device;
-  {
-    g_surface.Configure(&surfaceConfiguration);
+  g_graphicsConfig.surfaceWidth = nativeWidth;
+  g_graphicsConfig.surfaceHeight = nativeHeight;
+  if (surfaceChanged) {
+    g_surface->resize(nativeWidth, nativeHeight);
   }
   g_frameBuffer = create_render_texture(width, height, true);
   g_frameBufferResolved = create_render_texture(width, height, false);
   g_depthBuffer = create_depth_texture(width, height);
-  g_CopyBindGroup = create_copy_bind_group(present_source());
 }
 
 bool refresh_surface(bool recreate) {
   gfx::gpu_synchronize();
-  if (!g_instance || !g_device) {
+  if (g_device == nullptr) {
     return false;
   }
+  g_device->wait_idle();
   if (!window::is_presentable()) {
-    {
-      release_surface_locked();
-    }
+    release_surface_locked();
     return false;
   }
-  if ((!g_surface || recreate) && !create_surface()) {
+  if ((g_surface == nullptr || recreate) && !create_surface()) {
     return false;
   }
-  uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
-  uint32_t height = g_graphicsConfig.surfaceConfiguration.height;
+  uint32_t width = g_graphicsConfig.surfaceWidth;
+  uint32_t height = g_graphicsConfig.surfaceHeight;
   uint32_t nativeWidth = width;
   uint32_t nativeHeight = height;
   if (window::get_sdl_window() != nullptr) {

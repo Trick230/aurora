@@ -7,20 +7,16 @@
 
 namespace aurora::gfx {
 struct TextureUpload {
-  wgpu::TexelCopyBufferLayout layout;
-  wgpu::TexelCopyTextureInfo tex;
-  wgpu::Extent3D size;
-  wgpu::Buffer buffer;
-
-  TextureUpload(wgpu::TexelCopyBufferLayout layout, wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size) noexcept
-  : layout(layout), tex(std::move(tex)), size(size) {}
-  TextureUpload(wgpu::TexelCopyBufferLayout layout, wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size,
-                wgpu::Buffer buffer) noexcept
-  : layout(layout), tex(std::move(tex)), size(size), buffer(std::move(buffer)) {}
+  uint64_t offset = 0; // in the frame's texture uploads, or in buffer
+  uint32_t bytesPerRow = 0;
+  std::shared_ptr<rhi::Texture> texture;
+  uint32_t mip = 0;
+  Extent3D size;
+  std::shared_ptr<rhi::Buffer> buffer;
 };
 void queue_texture_upload(TextureUpload upload);
 void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage,
-                               wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size);
+                               std::shared_ptr<rhi::Texture> texture, uint32_t mip, Extent3D size);
 
 struct TextureFormatInfo {
   uint8_t blockWidth;
@@ -28,27 +24,25 @@ struct TextureFormatInfo {
   uint8_t blockSize;
   bool compressed;
 };
-TextureFormatInfo format_info(wgpu::TextureFormat format) noexcept;
-uint64_t calc_texture_size(wgpu::TextureFormat format, uint32_t width, uint32_t height, uint32_t mips) noexcept;
-bool is_block_aligned(wgpu::TextureFormat format, uint32_t width, uint32_t height) noexcept;
+TextureFormatInfo format_info(rhi::Format format) noexcept;
+uint64_t calc_texture_size(rhi::Format format, uint32_t width, uint32_t height, uint32_t mips) noexcept;
+bool is_block_aligned(rhi::Format format, uint32_t width, uint32_t height) noexcept;
 
 constexpr u32 InvalidTextureFormat = -1;
 struct TextureRef {
-  wgpu::Texture texture;
-  wgpu::TextureView sampleTextureView;
-  wgpu::TextureView attachmentTextureView;
-  wgpu::Extent3D size;
-  wgpu::TextureFormat format;
+  std::shared_ptr<rhi::Texture> texture;
+  std::shared_ptr<rhi::TextureView> sampleTextureView;
+  Extent3D size;
+  rhi::Format format;
   uint32_t mipCount;
   u32 gxFormat;
   bool hasArbitraryMips = false;
   bool isReplacement = false;
 
-  TextureRef(wgpu::Texture texture, wgpu::TextureView sampleTextureView, wgpu::TextureView attachmentTextureView,
-             wgpu::Extent3D size, wgpu::TextureFormat format, uint32_t mipCount, u32 gxFormat)
+  TextureRef(std::shared_ptr<rhi::Texture> texture, std::shared_ptr<rhi::TextureView> sampleTextureView, Extent3D size,
+             rhi::Format format, uint32_t mipCount, u32 gxFormat)
   : texture(std::move(texture))
   , sampleTextureView(std::move(sampleTextureView))
-  , attachmentTextureView(std::move(attachmentTextureView))
   , size(size)
   , format(format)
   , mipCount(mipCount)
@@ -126,7 +120,7 @@ struct TextureBind {
   TextureBind() noexcept = default;
   TextureBind(const GXTexObj_& obj, TextureHandle handle) noexcept : ref(std::move(handle)), texObj(obj) {}
   void reset() noexcept { ref.reset(); }
-  [[nodiscard]] wgpu::SamplerDescriptor get_descriptor() const noexcept;
+  [[nodiscard]] rhi::SamplerDesc get_descriptor() const noexcept;
   operator bool() const noexcept { return ref.operator bool(); }
 };
 } // namespace aurora::gfx

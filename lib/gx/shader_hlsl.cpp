@@ -1062,6 +1062,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
         "    float4 color;\n"
         "    float3 cos_att;\n"
         "    float3 dist_att;\n"
+        "    float pad; // HLSL would pack what follows the array here\n"
         "};";
     if (UsePerPixelLighting) {
       vtxOutAttrs += fmt::format("\n    float3 mv_pos : TEXCOORD{};", vtxOutIdx++);

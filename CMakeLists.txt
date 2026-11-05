@@ -52,5 +52,6 @@ set_property(CACHE AURORA_SDL3_LINKAGE PROPERTY STRINGS shared static)
 
 add_subdirectory(extern)
 
+include(cmake/AuroraRhi.cmake)
 include(cmake/aurora_core.cmake)
 include(cmake/aurora_gx.cmake)

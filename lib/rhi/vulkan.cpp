@@ -580,7 +580,8 @@ public:
     info.mipLodBias = desc.lod_bias;
     info.anisotropyEnable = desc.anisotropy > 1;
     info.maxAnisotropy = std::min(static_cast<float>(desc.anisotropy), max_anisotropy);
-    info.maxLod = VK_LOD_CLAMP_NONE;
+    info.minLod = desc.min_lod;
+    info.maxLod = desc.max_lod;
     auto sampler = std::make_unique<VulkanSampler>();
     sampler->owner = this;
     if (vkCreateSampler(device, &info, nullptr, &sampler->sampler) != VK_SUCCESS)
@@ -1277,6 +1278,7 @@ std::unique_ptr<Device> create_vulkan_device(const DeviceOptions& options, std::
   features13.pNext = &features12;
   features13.dynamicRendering = VK_TRUE;
   features13.synchronization2 = VK_TRUE;
+  features13.shaderDemoteToHelperInvocation = VK_TRUE; // what DXC makes of discard
   VkPhysicalDeviceFeatures features{};
   features.textureCompressionBC = VK_TRUE;
   features.dualSrcBlend = VK_TRUE;

@@ -71,7 +71,7 @@ constexpr u32 MaxPnMtx = (GX_PNMTX9 / 3) + 1;
 constexpr u32 MaxIndexAttr = 12; // VA_POS -> VA_TEX7
 constexpr u32 MaxUniformSize = 3840;
 
-extern wgpu::BindGroup g_emptyTextureBindGroup;
+extern rhi::BindGroup* g_emptyTextureBindGroup;
 
 template <typename Arg, Arg Default>
 struct TevPass {
@@ -551,11 +551,9 @@ struct BindGroupRanges {
   bool operator==(const BindGroupRanges& rhs) const = default;
 };
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept;
-wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, DstAlphaMode dstAlphaMode,
-                                    ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
-                                    wgpu::ShaderModule shader, const char* label) noexcept;
-std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlphaMode) noexcept;
-wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode dstAlphaMode) noexcept;
+std::shared_ptr<rhi::RenderPipeline> build_pipeline(const PipelineConfig& config, DstAlphaMode dstAlphaMode,
+                                                     const rhi::ShaderCode& vertex,
+                                                     const rhi::ShaderCode& fragment) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;

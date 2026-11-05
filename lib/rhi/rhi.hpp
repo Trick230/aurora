@@ -101,6 +101,7 @@ struct SamplerDesc {
   Filter min = Filter::Linear, mag = Filter::Linear, mip = Filter::Linear;
   AddressMode u = AddressMode::Repeat, v = AddressMode::Repeat;
   float lod_bias = 0.0f;
+  float min_lod = 0.0f, max_lod = 1000.0f;
   uint32_t anisotropy = 1;
 };
 

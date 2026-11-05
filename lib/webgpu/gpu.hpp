@@ -3,26 +3,34 @@
 #include <aurora/aurora.h>
 #include <aurora/math.hpp>
 
-#include "wgpu.hpp"
+#include "rhi.hpp"
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 struct SDL_Window;
 
 namespace aurora::webgpu {
 struct GraphicsConfig {
-  wgpu::SurfaceConfiguration surfaceConfiguration;
-  wgpu::TextureFormat depthFormat;
+  rhi::Format surfaceFormat;
+  uint32_t surfaceWidth;
+  uint32_t surfaceHeight;
+  rhi::PresentMode presentMode;
+  rhi::Format depthFormat;
   uint32_t msaaSamples;
   uint16_t textureAnisotropy;
 };
+struct Extent {
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
 struct TextureWithSampler {
-  wgpu::Texture texture;
-  wgpu::TextureView view;
-  wgpu::Extent3D size;
-  wgpu::TextureFormat format;
-  wgpu::Sampler sampler;
+  std::shared_ptr<rhi::Texture> texture;
+  std::shared_ptr<rhi::TextureView> view;
+  Extent size;
+  rhi::Format format = rhi::Format::Undefined;
+  std::shared_ptr<rhi::Sampler> sampler;
 };
 struct Viewport {
   float left;
@@ -39,23 +47,13 @@ struct Viewport {
   bool operator!=(const Viewport& rhs) const { return !(*this == rhs); }
 };
 
-extern wgpu::Device g_device;
-extern wgpu::Queue g_queue;
-extern wgpu::Surface g_surface;
-extern wgpu::BackendType g_backendType;
+extern rhi::Device* g_device;
+extern rhi::Swapchain* g_surface;
 extern GraphicsConfig g_graphicsConfig;
 extern TextureWithSampler g_frameBuffer;
 extern TextureWithSampler g_frameBufferResolved;
 extern TextureWithSampler g_depthBuffer;
-extern wgpu::RenderPipeline g_CopyPipeline;
-extern wgpu::BindGroup g_CopyBindGroup;
-extern wgpu::Instance g_instance;
-extern wgpu::AdapterInfo g_adapterInfo;
-extern bool g_hasCoreFeatures;
-extern bool g_bcTexturesSupported;
-extern bool g_astcTexturesSupported;
-extern bool g_textureComponentSwizzleSupported;
-extern bool g_dualSourceBlendingSupported;
+extern rhi::RenderPipeline* g_CopyPipeline;
 
 bool initialize(AuroraBackend backend, bool allowCpu);
 void shutdown();
@@ -64,16 +62,11 @@ bool refresh_surface(bool recreate = true);
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force = false);
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);
 const TextureWithSampler& present_source() noexcept;
-wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source);
+std::unique_ptr<rhi::BindGroup> create_copy_bind_group(const TextureWithSampler& source);
 Viewport calculate_present_viewport(uint32_t surface_width, uint32_t surface_height, uint32_t content_width,
                                     uint32_t content_height) noexcept;
-const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport);
-void draw_clear(const wgpu::RenderPassEncoder& pass, bool clearColor, bool clearAlpha, bool clearDepth,
-                const Vec4<float>& clearColorValue, float clearDepthValue);
-
-size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void* userdata);
-void store_to_cache(void const* key, size_t keySize, void const* value, size_t valueSize, void* userdata);
-void cache_prune();
-void cache_shutdown();
-
+const TextureWithSampler& resample_present_source(rhi::CommandList& list, const Viewport& viewport);
+// A pipeline's shaders from one HLSL source with vs_main and fs_main; fatal if it
+// doesn't compile, since these sources are ours.
+rhi::ShaderCode compile_shader(rhi::ShaderStage stage, const std::string& source, const char* entry);
 } // namespace aurora::webgpu

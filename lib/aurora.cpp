@@ -4,7 +4,6 @@
 #include "gfx/render_worker.hpp"
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
-#include <webgpu/webgpu_cpp.h>
 
 #include "internal.hpp"
 #include "window.hpp"
@@ -28,7 +27,6 @@ Module Log("aurora");
 
 // GPU
 using webgpu::g_device;
-using webgpu::g_queue;
 using webgpu::g_surface;
 
 uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
@@ -46,41 +44,24 @@ const char* frame_dump_dir() noexcept {
 }
 
 struct FrameDump {
-  wgpu::Buffer buffer;
+  std::unique_ptr<rhi::Buffer> buffer;
   uint32_t width = 0, height = 0, row = 0;
   bool bgra = false;
 };
 
-FrameDump frame_dump_copy(const wgpu::CommandEncoder& encoder) {
+FrameDump frame_dump_copy(rhi::CommandList& list) {
   const auto& source = webgpu::present_source();
   FrameDump dump{.width = source.size.width, .height = source.size.height};
   dump.row = AURORA_ALIGN(dump.width * 4, 256);
-  dump.bgra =
-      source.format == wgpu::TextureFormat::BGRA8Unorm || source.format == wgpu::TextureFormat::BGRA8UnormSrgb;
-  const wgpu::BufferDescriptor descriptor{
-      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
-      .size = uint64_t{dump.row} * dump.height,
-  };
-  dump.buffer = g_device.CreateBuffer(&descriptor);
-  const wgpu::TexelCopyTextureInfo src{.texture = source.texture};
-  const wgpu::TexelCopyBufferInfo dst{.layout = {.bytesPerRow = dump.row, .rowsPerImage = dump.height},
-                                      .buffer = dump.buffer};
-  const wgpu::Extent3D extent{dump.width, dump.height, 1};
-  encoder.CopyTextureToBuffer(&src, &dst, &extent);
+  dump.bgra = source.format == rhi::Format::BGRA8Unorm;
+  dump.buffer = g_device->create_buffer({uint64_t{dump.row} * dump.height, rhi::MemoryKind::Readback});
+  list.copy_texture_to_buffer(*source.texture, {}, *dump.buffer, 0, dump.row);
   return dump;
 }
 
 void frame_dump_write(const FrameDump& dump) {
   static uint64_t frame = 0;
-  const uint64_t size = uint64_t{dump.row} * dump.height;
-  bool done = false;
-  const auto future = dump.buffer.MapAsync(wgpu::MapMode::Read, 0, size, wgpu::CallbackMode::WaitAnyOnly,
-                                           [&](wgpu::MapAsyncStatus, wgpu::StringView) { done = true; });
-  webgpu::g_instance.WaitAny(future, UINT64_MAX);
-  if (!done) {
-    return;
-  }
-  const auto* mapped = static_cast<const uint8_t*>(dump.buffer.GetConstMappedRange());
+  const auto* mapped = static_cast<const uint8_t*>(dump.buffer->mapped());
   std::vector<uint8_t> pixels(size_t{dump.width} * 4 * dump.height);
   for (uint32_t y = 0; y < dump.height; ++y) {
     const uint8_t* from = mapped + size_t{y} * dump.row;
@@ -105,30 +86,22 @@ void frame_dump_write(const FrameDump& dump) {
       std::fclose(raw);
     }
   }
-  dump.buffer.Unmap();
   ++frame;
 }
 
-void set_present_viewport(const wgpu::RenderPassEncoder& pass, const gfx::Viewport& viewport, uint32_t surfaceWidth,
+void set_present_viewport(rhi::CommandList& pass, const gfx::Viewport& viewport, uint32_t surfaceWidth,
                           uint32_t surfaceHeight) noexcept {
-  pass.SetViewport(viewport.left, viewport.top, viewport.width, viewport.height, viewport.znear, viewport.zfar);
+  pass.set_viewport(viewport.left, viewport.top, viewport.width, viewport.height, viewport.znear, viewport.zfar);
   const auto scissorX = clamp_scissor_coord(std::floor(viewport.left), surfaceWidth);
   const auto scissorY = clamp_scissor_coord(std::floor(viewport.top), surfaceHeight);
   const auto scissorRight = clamp_scissor_coord(std::ceil(viewport.left + viewport.width), surfaceWidth);
   const auto scissorBottom = clamp_scissor_coord(std::ceil(viewport.top + viewport.height), surfaceHeight);
-  pass.SetScissorRect(scissorX, scissorY, scissorRight - scissorX, scissorBottom - scissorY);
+  pass.set_scissor(scissorX, scissorY, scissorRight - scissorX, scissorBottom - scissorY);
 }
 
 constexpr std::array PreferredBackendOrder{
-#ifdef DAWN_ENABLE_BACKEND_D3D12
     BACKEND_D3D12,
-#endif
-#ifdef DAWN_ENABLE_BACKEND_METAL
-    BACKEND_METAL,
-#endif
-#ifdef DAWN_ENABLE_BACKEND_VULKAN
     BACKEND_VULKAN,
-#endif
 };
 
 AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexcept {
@@ -171,6 +144,9 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 
   /* Attempt to create a window using the calling application's desired backend */
   AuroraBackend selectedBackend = config.desiredBackend;
+  if (const char* name = std::getenv("AURORA_BACKEND")) {
+    selectedBackend = std::string_view{name} == "vulkan" ? BACKEND_VULKAN : BACKEND_D3D12;
+  }
   bool windowCreated = false;
   if (selectedBackend != BACKEND_AUTO && window::create_window()) {
     if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
@@ -237,9 +213,9 @@ bool begin_frame() noexcept {
     if (window::is_paused()) {
       return false;
     }
-    if (!g_surface) {
+    if (g_surface == nullptr) {
       webgpu::refresh_surface(true);
-      if (!g_surface) {
+      if (g_surface == nullptr) {
         return false;
       }
     }
@@ -258,125 +234,44 @@ void end_frame() noexcept {
   auto imguiDrawData = imgui::freeze();
 
   const auto& presentSource = webgpu::present_source();
-  const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
-                                                           webgpu::g_graphicsConfig.surfaceConfiguration.height,
+  const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceWidth,
+                                                           webgpu::g_graphicsConfig.surfaceHeight,
                                                            presentSource.size.width, presentSource.size.height);
 
-  gfx::end_frame([viewport, imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
-    const FrameDump frameDump = frame_dump_dir() ? frame_dump_copy(encoder) : FrameDump{};
-    wgpu::Texture currentTexture;
-    wgpu::TextureView currentView;
-    auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
-    {
-      if (window::is_presentable() && g_surface) {
-        wgpu::SurfaceTexture surfaceTexture;
-        g_surface.GetCurrentTexture(&surfaceTexture);
-        surfaceStatus = surfaceTexture.status;
-        if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
-          currentTexture = std::move(surfaceTexture.texture);
-          currentView = currentTexture.CreateView();
-        }
+  gfx::end_frame([viewport, imguiDrawData = std::move(imguiDrawData)](rhi::CommandList& list) -> uint64_t {
+    const FrameDump frameDump = frame_dump_dir() ? frame_dump_copy(list) : FrameDump{};
+    rhi::Texture* image = nullptr;
+    if (window::is_presentable() && g_surface != nullptr) {
+      image = g_surface->acquire();
+      if (image == nullptr) {
+        window::push_custom_event(window::CustomEvent::RefreshSurface);
       }
     }
-
-    const bool canPresent = currentTexture && currentView;
-    if (canPresent) {
-      const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
-      const wgpu::BindGroup presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
-      {
-        const std::array attachments{
-            wgpu::RenderPassColorAttachment{
-                .view = currentView,
-                .loadOp = wgpu::LoadOp::Clear,
-                .storeOp = wgpu::StoreOp::Store,
-            },
-        };
-        const wgpu::RenderPassDescriptor renderPassDescriptor{
-            .label = "EFB copy render pass",
-            .colorAttachmentCount = attachments.size(),
-            .colorAttachments = attachments.data(),
-        };
-        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
-        // Copy EFB -> XFB (swapchain)
-        pass.SetPipeline(webgpu::g_CopyPipeline);
-        pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
-        set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
-                             webgpu::g_graphicsConfig.surfaceConfiguration.height);
-
-        pass.Draw(3);
-        pass.End();
-      }
-      if (imguiDrawData) {
-        const std::array attachments{
-            wgpu::RenderPassColorAttachment{
-                .view = currentView,
-                .loadOp = wgpu::LoadOp::Load,
-                .storeOp = wgpu::StoreOp::Store,
-            },
-        };
-        const wgpu::RenderPassDescriptor renderPassDescriptor{
-            .label = "ImGui render pass",
-            .colorAttachmentCount = attachments.size(),
-            .colorAttachments = attachments.data(),
-        };
-        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
-        pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
-                         static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
-        imgui::render(pass, imguiDrawData);
-        pass.End();
-      }
-    } else {
-      Log.info("Skipping present; window not presentable");
+    if (image != nullptr) {
+      const auto& resampledSource = webgpu::resample_present_source(list, viewport);
+      const auto presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
+      rhi::RenderPassDesc pass;
+      pass.color.target = image;
+      pass.color.clear = true;
+      list.begin_render_pass(pass);
+      // Copy EFB -> XFB (swapchain)
+      list.set_pipeline(*webgpu::g_CopyPipeline);
+      list.set_bind_group(0, *presentBindGroup, nullptr, 0);
+      set_present_viewport(list, viewport, webgpu::g_graphicsConfig.surfaceWidth, webgpu::g_graphicsConfig.surfaceHeight);
+      list.draw(3, 0);
+      list.end_render_pass();
+      imgui::render(list, imguiDrawData);
     }
-    const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
-    const auto buffer = encoder.Finish(&cmdBufDescriptor);
-    {
-      g_queue.Submit(1, &buffer);
-    }
+    list.end();
+    const uint64_t ticket = g_device->submit(list);
     if (frameDump.buffer) {
+      g_device->wait(ticket);
       frame_dump_write(frameDump);
     }
-    if (canPresent && g_surface) {
-      wgpu::ConvertibleStatus status = wgpu::Status::Error;
-      {
-        if (window::is_presentable()) {
-          status = g_surface.Present();
-        }
-      }
-      if (status) {
-      } else {
-        Log.warn("Surface present failed");
-        webgpu::release_surface();
-      }
-    } else if (g_surface) {
-      switch (surfaceStatus) {
-      case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
-        Log.warn("Surface texture acquisition timed out");
-        break;
-      case wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal:
-      case wgpu::SurfaceGetCurrentTextureStatus::Outdated:
-        Log.info("Surface texture is {}, reconfiguring swapchain", magic_enum::enum_name(surfaceStatus));
-        window::push_custom_event(window::CustomEvent::RefreshSurface);
-        break;
-      case wgpu::SurfaceGetCurrentTextureStatus::Lost:
-        Log.warn("Surface texture is {}, releasing surface", magic_enum::enum_name(surfaceStatus));
-        webgpu::release_surface();
-        break;
-      case wgpu::SurfaceGetCurrentTextureStatus::Error:
-        Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceStatus));
-        g_surface = {};
-        break;
-      default:
-        if (!window::is_presentable()) {
-          webgpu::release_surface();
-        } else {
-          Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceStatus));
-        }
-        break;
-      }
+    if (image != nullptr) {
+      g_surface->present();
     }
-
-
+    return ticket;
   });
   window::set_frame_open(false);
 }

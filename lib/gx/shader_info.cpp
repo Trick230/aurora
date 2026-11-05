@@ -1,5 +1,7 @@
 #include "shader_info.hpp"
 
+#include "gx_fmt.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -676,4 +678,66 @@ gfx::Range build_uber_uniform(const ShaderInfo& info, u32 vtxStart, const BindGr
   g_gxState.stateDirty = false;
   return push_block(buf, matrices, lights, post, layout);
 }
+bool uses_texture_sample(const TevStage& stage) noexcept {
+  const auto& c = stage.colorPass;
+  const auto& a = stage.alphaPass;
+  return c.a == GX_CC_TEXC || c.a == GX_CC_TEXA || c.b == GX_CC_TEXC || c.b == GX_CC_TEXA || c.c == GX_CC_TEXC ||
+         c.c == GX_CC_TEXA || c.d == GX_CC_TEXC || c.d == GX_CC_TEXA || a.a == GX_CA_TEXA || a.b == GX_CA_TEXA ||
+         a.c == GX_CA_TEXA || a.d == GX_CA_TEXA;
+}
+
+u8 color_channel(GXChannelID id) noexcept {
+  switch (id) {
+    DEFAULT_FATAL("unimplemented color channel {}", id);
+  case GX_COLOR0:
+  case GX_ALPHA0:
+  case GX_COLOR0A0:
+    return 0;
+  case GX_COLOR1:
+  case GX_ALPHA1:
+  case GX_COLOR1A1:
+    return 1;
+  }
+}
+
+bool tev_color_arg_is_normalized(GXTevColorArg arg, const std::array<bool, MaxTevRegs>& colorNormalized,
+                                        const std::array<bool, MaxTevRegs>& alphaNormalized) {
+  switch (arg) {
+  case GX_CC_CPREV:
+    return colorNormalized[GX_TEVPREV];
+  case GX_CC_APREV:
+    return alphaNormalized[GX_TEVPREV];
+  case GX_CC_C0:
+    return colorNormalized[GX_TEVREG0];
+  case GX_CC_A0:
+    return alphaNormalized[GX_TEVREG0];
+  case GX_CC_C1:
+    return colorNormalized[GX_TEVREG1];
+  case GX_CC_A1:
+    return alphaNormalized[GX_TEVREG1];
+  case GX_CC_C2:
+    return colorNormalized[GX_TEVREG2];
+  case GX_CC_A2:
+    return alphaNormalized[GX_TEVREG2];
+  default:
+    return true;
+  }
+}
+
+bool tev_alpha_arg_is_normalized(GXTevAlphaArg arg, const std::array<bool, MaxTevRegs>& alphaNormalized) {
+  switch (arg) {
+  case GX_CA_APREV:
+    return alphaNormalized[GX_TEVPREV];
+  case GX_CA_A0:
+    return alphaNormalized[GX_TEVREG0];
+  case GX_CA_A1:
+    return alphaNormalized[GX_TEVREG1];
+  case GX_CA_A2:
+    return alphaNormalized[GX_TEVREG2];
+  default:
+    return true;
+  }
+}
+
+bool tev_alpha_compares_color(GXTevOp op) { return op >= GX_TEV_COMP_R8_GT && op <= GX_TEV_COMP_BGR24_EQ; }
 } // namespace aurora::gx

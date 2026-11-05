@@ -12,6 +12,7 @@ struct Light {
     float4 color;
     float3 cos_att;
     float3 dist_att;
+    float pad; // HLSL would pack what follows the array here
 };
 struct Fog {
     float4 color;

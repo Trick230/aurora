@@ -536,7 +536,8 @@ public:
     native.MipLODBias = desc.lod_bias;
     native.MaxAnisotropy = desc.anisotropy;
     native.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    native.MaxLOD = D3D12_FLOAT32_MAX;
+    native.MinLOD = desc.min_lod;
+    native.MaxLOD = desc.max_lod;
     return sampler;
   }
 

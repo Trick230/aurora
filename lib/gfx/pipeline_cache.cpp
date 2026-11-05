@@ -32,7 +32,7 @@ constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache.db";
 constexpr const char* SdlVfsName = "aurora_pipeline_cache_sdl_vfs";
 
 struct CachedPipeline {
-  wgpu::RenderPipeline pipeline;
+  std::shared_ptr<rhi::RenderPipeline> pipeline;
   uint32_t firstFrameUsed = UINT32_MAX;
 };
 
@@ -391,7 +391,6 @@ static void notify_pipeline_ready(bool queued) {
   ++createdPipelines;
   if (queued && --queuedPipelines == 0 && g_gpuCachePrunePending.exchange(false, std::memory_order_acq_rel)) {
     // Prune GPU cache entries after fully loading the pipeline cache.
-    webgpu::cache_prune();
   }
   g_pipelineReadyCv.notify_all();
 }
@@ -1099,14 +1098,10 @@ bool pipeline_ready(PipelineRef ref) {
   return g_pipelines.contains(ref);
 }
 
-bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
+rhi::RenderPipeline* get_pipeline(PipelineRef ref) {
   std::lock_guard guard{g_pipelineMutex};
   const auto it = g_pipelines.find(ref);
-  if (it == g_pipelines.end()) {
-    return false;
-  }
-  pipeline = it->second.pipeline;
-  return true;
+  return it == g_pipelines.end() ? nullptr : it->second.pipeline.get();
 }
 
 } // namespace aurora::gfx
