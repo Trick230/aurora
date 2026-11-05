@@ -16,6 +16,7 @@
 #include "../gfx/render_worker.hpp"
 #include "../internal.hpp"
 #include "../window.hpp"
+#include "shader_cache.hpp"
 
 namespace aurora::gpu {
 static Module Log("aurora::gpu");
@@ -197,10 +198,14 @@ void create_resample_pipeline() {
 
 rhi::ShaderCode compile_shader(rhi::ShaderStage stage, const std::string& source, const char* entry) {
   rhi::ShaderCode code;
+  if (shader_cache::find(stage, source, entry, &code)) {
+    return code;
+  }
   std::string error;
   if (!rhi::compile_shader(g_device->backend(), stage, source, entry, &code, &error)) {
     FATAL("Shader {} doesn't compile: {}\n{}", entry, error, source);
   }
+  shader_cache::store(stage, source, entry, code);
   return code;
 }
 

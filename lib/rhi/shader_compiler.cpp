@@ -40,6 +40,31 @@ Compiler* thread_compiler(std::string* error) {
 
 } // namespace
 
+std::string shader_compiler_version() {
+  // Bumped whenever compile_shader's arguments change.
+  std::string version = "args1";
+  std::string error;
+  Compiler* dxc = thread_compiler(&error);
+  if (!dxc)
+    return version;
+  ComPtr<IDxcVersionInfo> info;
+  if (SUCCEEDED(dxc->compiler.As(&info))) {
+    UINT32 major = 0, minor = 0;
+    info->GetVersion(&major, &minor);
+    version += " dxc " + std::to_string(major) + "." + std::to_string(minor);
+  }
+  ComPtr<IDxcVersionInfo2> commit;
+  if (SUCCEEDED(dxc->compiler.As(&commit))) {
+    UINT32 count = 0;
+    char* hash = nullptr;
+    if (SUCCEEDED(commit->GetCommitInfo(&count, &hash)) && hash) {
+      version += " " + std::to_string(count) + " " + hash;
+      CoTaskMemFree(hash);
+    }
+  }
+  return version;
+}
+
 bool compile_shader(Backend backend, ShaderStage stage, const std::string& source, const std::string& entry,
                     ShaderCode* code, std::string* error) {
   Compiler* dxc = thread_compiler(error);

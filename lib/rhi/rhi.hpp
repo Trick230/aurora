@@ -174,6 +174,9 @@ enum class ShaderStage { Vertex, Fragment };
 using ShaderCode = std::vector<uint8_t>;
 
 // The same HLSL for every backend.
+// The compiler's version and the arguments compile_shader passes it: what
+// compiled code is only good for.
+std::string shader_compiler_version();
 bool compile_shader(Backend backend, ShaderStage stage, const std::string& source, const std::string& entry,
                     ShaderCode* code, std::string* error);
 

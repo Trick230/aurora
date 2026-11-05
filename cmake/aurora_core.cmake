@@ -4,6 +4,7 @@ add_library(aurora_core STATIC
         lib/logging.cpp
         lib/window.cpp
         lib/gpu/gpu.cpp
+        lib/gpu/shader_cache.cpp
 )
 add_library(aurora::core ALIAS aurora_core)
 set_target_properties(aurora_core PROPERTIES FOLDER "aurora")
