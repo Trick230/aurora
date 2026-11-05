@@ -9,10 +9,6 @@
 
 union SDL_Event;
 
-namespace wgpu {
-class RenderPassEncoder;
-} // namespace wgpu
-
 namespace aurora::imgui {
 class DrawData {
 public:
@@ -26,7 +22,7 @@ private:
   std::shared_ptr<Impl> m_impl;
 
   friend DrawData freeze() noexcept;
-  friend void render(rhi::CommandList& list, const DrawData& drawData) noexcept;
+  friend void render(rhi::CommandList& list, rhi::Texture& target, const DrawData& drawData) noexcept;
 };
 
 void create_context() noexcept;
@@ -39,5 +35,5 @@ void set_active(bool active) noexcept;
 void process_event(const SDL_Event& event) noexcept;
 void new_frame(const AuroraWindowSize& size) noexcept;
 DrawData freeze() noexcept;
-void render(rhi::CommandList& list, const DrawData& drawData) noexcept;
+void render(rhi::CommandList& list, rhi::Texture& target, const DrawData& drawData) noexcept;
 } // namespace aurora::imgui

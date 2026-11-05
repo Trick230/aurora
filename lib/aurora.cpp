@@ -230,8 +230,9 @@ bool begin_frame() noexcept {
 }
 
 void end_frame() noexcept {
-  gfx::finish();
+  // Before finish: what ImGui uploads goes with this frame.
   auto imguiDrawData = imgui::freeze();
+  gfx::finish();
 
   const auto& presentSource = webgpu::present_source();
   const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceWidth,
@@ -260,7 +261,7 @@ void end_frame() noexcept {
       set_present_viewport(list, viewport, webgpu::g_graphicsConfig.surfaceWidth, webgpu::g_graphicsConfig.surfaceHeight);
       list.draw(3, 0);
       list.end_render_pass();
-      imgui::render(list, imguiDrawData);
+      imgui::render(list, *image, imguiDrawData);
     }
     list.end();
     const uint64_t ticket = g_device->submit(list);
