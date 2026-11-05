@@ -471,6 +471,48 @@ Pixels render_draw_constants(Device& device, int& failures) {
 #ifdef _WIN32
 // Frames through a real swapchain, in a window never shown, in every present mode
 // and across a resize: each frame's color has to reach the image that was acquired.
+// Each mip of a BC1 texture down to 1x1 written whole blocks at a time and read
+// back, smaller than a block ones too.
+int test_compressed_mips(Device& device) {
+  constexpr uint32_t Mips = 5;
+  constexpr uint64_t Slot = 512;
+  auto texture = must(device.create_texture({16, 16, Mips, 1, Format::BC1, TextureSampled}), "bc1");
+  auto upload = must(device.create_buffer({Slot * Mips, MemoryKind::Upload}), "upload");
+  auto readback = must(device.create_buffer({Slot * Mips, MemoryKind::Readback}), "readback");
+  auto* const in = static_cast<uint8_t*>(upload->mapped());
+  for (uint64_t at = 0; at < Slot * Mips; ++at) {
+    in[at] = static_cast<uint8_t>(at * 31 + at / Slot);
+  }
+  auto list = must(device.create_command_list(), "list");
+  list->begin();
+  for (uint32_t mip = 0; mip < Mips; ++mip) {
+    const uint32_t blocks = std::max(((16u >> mip) + 3) / 4, 1u);
+    TextureRegion region;
+    region.mip = mip;
+    region.width = blocks * 4;
+    region.height = blocks * 4;
+    list->copy_buffer_to_texture(*upload, Slot * mip, 256, *texture, region);
+  }
+  for (uint32_t mip = 0; mip < Mips; ++mip) {
+    TextureRegion region;
+    region.mip = mip;
+    list->copy_texture_to_buffer(*texture, region, *readback, Slot * mip, 256);
+  }
+  list->end();
+  device.wait(device.submit(*list));
+  const auto* const back = static_cast<const uint8_t*>(readback->mapped());
+  int failures = 0;
+  for (uint32_t mip = 0; mip < Mips; ++mip) {
+    const uint32_t blocks = std::max(((16u >> mip) + 3) / 4, 1u);
+    for (uint32_t row = 0; row < blocks; ++row) {
+      if (std::memcmp(in + Slot * mip + row * 256, back + Slot * mip + row * 256, blocks * 8) != 0) {
+        ++failures;
+      }
+    }
+  }
+  return failures;
+}
+
 int test_swapchain(Device& device) {
   WNDCLASSA window_class{};
   window_class.lpfnWndProc = DefWindowProcA;
@@ -564,6 +606,9 @@ int main() {
     results[i] = render(*device);
     results[i].push_back(render_draw_constants(*device, failures));
     device->wait_idle();
+    const int bc_failures = test_compressed_mips(*device);
+    std::printf("%s: compressed mips %s\n", backends[i].name, bc_failures ? "failed" : "ok");
+    failures += bc_failures;
 #ifdef _WIN32
     const int swapchain_failures = test_swapchain(*device);
     std::printf("%s: swapchain %s\n", backends[i].name, swapchain_failures ? "failed" : "ok");

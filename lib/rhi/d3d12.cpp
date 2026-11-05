@@ -317,6 +317,13 @@ public:
     transition(to.resource, D3D12_RESOURCE_STATE_COPY_DEST, to.rest);
   }
 
+  // Compressed formats copy whole blocks, even for a mip smaller than one.
+  static uint32_t copy_extent(const D3D12Texture& texture, uint32_t size) {
+    const bool compressed = (texture.copy_format >= DXGI_FORMAT_BC1_TYPELESS && texture.copy_format <= DXGI_FORMAT_BC5_SNORM) ||
+                            (texture.copy_format >= DXGI_FORMAT_BC6H_TYPELESS && texture.copy_format <= DXGI_FORMAT_BC7_UNORM_SRGB);
+    return compressed ? (size + 3) & ~3u : size;
+  }
+
   static D3D12_TEXTURE_COPY_LOCATION footprint(D3D12Buffer& buffer, const D3D12Texture& texture, uint64_t offset,
                                                uint32_t bytes_per_row, uint32_t width, uint32_t height) {
     D3D12_TEXTURE_COPY_LOCATION location{};
@@ -341,8 +348,8 @@ public:
   void copy_buffer_to_texture(Buffer& source, uint64_t offset, uint32_t bytes_per_row, Texture& destination,
                               const TextureRegion& region) override {
     auto& texture = static_cast<D3D12Texture&>(destination);
-    const uint32_t width = region.width ? region.width : MipExtent(texture.width, region.mip);
-    const uint32_t height = region.height ? region.height : MipExtent(texture.height, region.mip);
+    const uint32_t width = copy_extent(texture, region.width ? region.width : MipExtent(texture.width, region.mip));
+    const uint32_t height = copy_extent(texture, region.height ? region.height : MipExtent(texture.height, region.mip));
     transition(texture, D3D12_RESOURCE_STATE_COPY_DEST);
     const auto to = subresource(texture, region.mip);
     const auto from = footprint(static_cast<D3D12Buffer&>(source), texture, offset, bytes_per_row, width, height);
@@ -353,8 +360,8 @@ public:
   void copy_texture_to_buffer(Texture& source, const TextureRegion& region, Buffer& destination, uint64_t offset,
                               uint32_t bytes_per_row) override {
     auto& texture = static_cast<D3D12Texture&>(source);
-    const uint32_t width = region.width ? region.width : MipExtent(texture.width, region.mip);
-    const uint32_t height = region.height ? region.height : MipExtent(texture.height, region.mip);
+    const uint32_t width = copy_extent(texture, region.width ? region.width : MipExtent(texture.width, region.mip));
+    const uint32_t height = copy_extent(texture, region.height ? region.height : MipExtent(texture.height, region.mip));
     auto& buffer = static_cast<D3D12Buffer&>(destination);
     transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE);
     transition(buffer.resource, buffer.rest, D3D12_RESOURCE_STATE_COPY_DEST);

@@ -256,6 +256,8 @@ struct RenderPassDesc {
   DepthAttachment depth;
 };
 
+// Width and height 0 mean up to the mip's edge. A compressed mip smaller than a
+// block takes either its size or the block's.
 struct TextureRegion {
   uint32_t mip = 0;
   uint32_t x = 0, y = 0;

@@ -374,8 +374,10 @@ public:
     copy.bufferRowLength = bytes_per_row / block.bytes * block.size;
     copy.imageSubresource = {texture.aspect, region.mip, 0, 1};
     copy.imageOffset = {static_cast<int32_t>(region.x), static_cast<int32_t>(region.y), 0};
-    copy.imageExtent = {region.width ? region.width : MipExtent(texture.width, region.mip),
-                        region.height ? region.height : MipExtent(texture.height, region.mip), 1};
+    const uint32_t mip_width = MipExtent(texture.width, region.mip) - region.x;
+    const uint32_t mip_height = MipExtent(texture.height, region.mip) - region.y;
+    copy.imageExtent = {region.width ? std::min(region.width, mip_width) : mip_width,
+                        region.height ? std::min(region.height, mip_height) : mip_height, 1};
     return copy;
   }
 
