@@ -1,5 +1,6 @@
 #include "common.hpp"
 
+#include "ambient_occlusion.hpp"
 #include "clear.hpp"
 #include "../internal.hpp"
 #include "../gpu/gpu.hpp"
@@ -140,6 +141,11 @@ struct RenderPass {
   bool observable = false;
   bool sealed = false;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
+  // Ambient occlusion over what the pass drew, at its end and before its copy.
+  bool ambientOcclusion = false;
+  bool aoResolvedOnly = false; // applied to the resolve target alone
+  Range aoParams;
+  ClipRect aoRect;
 };
 
 struct FrameOp {
@@ -182,6 +188,17 @@ static render_worker::FrameSlotPool g_stagingSlots{StagingBufferCount};
 static u32 g_currentRenderPass = UINT32_MAX;
 static Viewport g_cachedViewport;
 static ClipRect g_cachedScissor;
+
+// Ambient occlusion goes over the world once it is drawn: before the first 2D
+// draw after it, an EFB copy, or the frame's end, and once per depth clear so
+// nothing is darkened twice.
+struct AoState {
+  bool pending = false; // the world was drawn since the depth was cleared
+  bool done = false;    // and has its occlusion
+  Mat4x4<float> proj;   // what it was drawn with
+  Viewport viewport;
+};
+static AoState g_ao;
 
 static void set_efb_targets(RenderPass& pass) {
   const bool multisampled = gpu::g_graphicsConfig.msaaSamples > 1;
@@ -370,10 +387,83 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
   return find_pipeline_blocking(ShaderType::Clear, config, [=] { return create_pipeline(config); });
 }
 
+static void add_ambient_occlusion(RenderPass& pass) {
+  const auto& vp = g_ao.viewport;
+  const auto left = std::clamp(static_cast<int32_t>(std::floor(vp.left)), 0, static_cast<int32_t>(pass.targetSize.width));
+  const auto top = std::clamp(static_cast<int32_t>(std::floor(vp.top)), 0, static_cast<int32_t>(pass.targetSize.height));
+  const auto right =
+      std::clamp(static_cast<int32_t>(std::ceil(vp.left + vp.width)), left, static_cast<int32_t>(pass.targetSize.width));
+  const auto bottom =
+      std::clamp(static_cast<int32_t>(std::ceil(vp.top + vp.height)), top, static_cast<int32_t>(pass.targetSize.height));
+  g_ao.pending = false;
+  g_ao.done = true;
+  if (right <= left || bottom <= top) {
+    return;
+  }
+  pass.ambientOcclusion = true;
+  pass.aoParams = ao::push_params(g_ao.proj, vp, pass.targetSize);
+  pass.aoRect = {left, top, right - left, bottom - top};
+}
+
+// A world draw: perspective, writing depth, over most of the EFB (not a model
+// in a corner of the HUD). A 2D draw after one ends the world's pass.
+static void note_draw_for_ambient_occlusion() {
+  const auto& state = gx::g_gxState;
+  if (state.projType != GX_ORTHOGRAPHIC) {
+    const auto& vp = g_cachedViewport;
+    const auto& size = current_render_passes()[g_currentRenderPass].targetSize;
+    const float area = std::max(vp.width, 0.f) * std::max(vp.height, 0.f);
+    if (!g_ao.done && state.depthCompare && state.depthUpdate && vp.znear < vp.zfar &&
+        area * 2.f >= static_cast<float>(size.width) * static_cast<float>(size.height)) {
+      g_ao.pending = true;
+      g_ao.proj = state.proj;
+      g_ao.viewport = vp;
+    }
+    return;
+  }
+  if (!g_ao.pending) {
+    return;
+  }
+  // The pass goes on as another, which keeps what this one drew.
+  auto& prevPass = current_render_passes()[g_currentRenderPass];
+  add_ambient_occlusion(prevPass);
+  prevPass.observable = true;
+  enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
+  RenderPass newPass{
+      .colorTexture = prevPass.colorTexture,
+      .resolveTexture = prevPass.resolveTexture,
+      .depthTexture = prevPass.depthTexture,
+      .copySourceTexture = prevPass.copySourceTexture,
+      .copySourceView = prevPass.copySourceView,
+      .copySourceDepthView = prevPass.copySourceDepthView,
+      .targetSize = prevPass.targetSize,
+      .msaaSamples = prevPass.msaaSamples,
+      .clearColor = false,
+      .clearDepth = false,
+  };
+  newPass.commands.reserve(2048);
+  current_render_passes().emplace_back(std::move(newPass));
+  ++g_currentRenderPass;
+  push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
+  push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
+}
+
 void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                   Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat, bool opaqueAlpha) {
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_currentRenderPass];
+  if (g_ao.pending) {
+    add_ambient_occlusion(prevPass);
+    // When the copy takes it all and the color is cleared after, only what it
+    // copies needs the occlusion: the resolved EFB, a sample a pixel.
+    const auto& size = prevPass.targetSize;
+    prevPass.aoResolvedOnly = prevPass.resolveTexture != nullptr && clearColor && clearAlpha && rect.x <= 0 &&
+                              rect.y <= 0 && rect.x + rect.width >= static_cast<int32_t>(size.width) &&
+                              rect.y + rect.height >= static_cast<int32_t>(size.height);
+  }
+  if (clearDepth) {
+    g_ao = {};
+  }
   prevPass.resolveTarget = std::move(texture);
   prevPass.resolveRect = rect;
   prevPass.resolveFormat = resolveFormat;
@@ -463,6 +553,9 @@ void clear_caches() noexcept {
 
 template <>
 void push_draw_command(gx::DrawData data) {
+  if (ao::enabled()) {
+    note_draw_for_ambient_occlusion();
+  }
   const uint64_t serial = g_commandSerial;
   push_draw_command(ShaderDrawCommand{.type = ShaderType::GX, .gx = data});
   if (g_commandSerial != serial) {
@@ -490,6 +583,7 @@ void initialize() {
   tex_copy_conv::initialize();
   tex_palette_conv::initialize();
   texture_replacement::initialize();
+  ao::initialize();
 
   g_uniformBufferOwner = g_device->create_buffer({UniformBufferSize});
   g_uniformBuffer = g_uniformBufferOwner.get();
@@ -549,6 +643,7 @@ void shutdown() {
   tex_copy_conv::shutdown();
   tex_palette_conv::shutdown();
   texture_replacement::shutdown();
+  ao::shutdown();
   gx::shutdown();
 
   {
@@ -657,6 +752,7 @@ bool begin_frame() {
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
   set_efb_targets(pass);
+  g_ao = {};
   pass.clearColorValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
   g_currentRenderPass = 0;
@@ -678,6 +774,9 @@ void finish() {
     frame.uniforms.append_zeroes(gx::MaxUniformSize);
     auto& pass = frame.renderPasses[g_currentRenderPass];
     pass.observable = true;
+    if (g_ao.pending) {
+      add_ambient_occlusion(pass);
+    }
     enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
     g_currentRenderPass = UINT32_MAX;
   }
@@ -879,6 +978,19 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
   list.begin_render_pass(passDesc);
   render_pass(list, passInfo);
   list.end_render_pass();
+  if (passInfo.ambientOcclusion) {
+    ao::apply(list, {
+                        .color = passInfo.aoResolvedOnly ? passInfo.resolveTexture.get()
+                                                         : passInfo.colorTexture.get(),
+                        .resolve = passInfo.aoResolvedOnly ? nullptr : passInfo.resolveTexture.get(),
+                        .depth = passInfo.copySourceDepthView.get(),
+                        .samples = passInfo.aoResolvedOnly ? 1 : passInfo.msaaSamples,
+                        .depthSamples = passInfo.msaaSamples,
+                        .size = passInfo.targetSize,
+                        .rect = passInfo.aoRect,
+                        .params = passInfo.aoParams,
+                    });
+  }
 
   if (passInfo.resolveTarget) {
     const auto& dstSize = passInfo.resolveTarget->size;

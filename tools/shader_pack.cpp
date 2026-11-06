@@ -2,6 +2,7 @@
 // pipelines for every backend:
 // the shaders_<backend>.bin files aurora loads from its resources directory.
 // Usage: aurora_shader_pack <initial_pipeline_cache.db> <out dir>
+#include "../lib/gfx/ambient_occlusion.hpp"
 #include "../lib/gfx/clear.hpp"
 #include "../lib/gfx/common.hpp"
 #include "../lib/gfx/tex_copy_conv.hpp"
@@ -93,7 +94,7 @@ int main(int argc, char** argv) {
     for (const auto mode : {gx::DstAlphaMode::None, gx::DstAlphaMode::Replace, gx::DstAlphaMode::DualSource}) {
       add(gx::hlsl::uber_source(mode));
     }
-    for (auto* const list : {gfx::clear::shader_sources, gfx::tex_copy_conv::shader_sources,
+    for (auto* const list : {gfx::ao::shader_sources, gfx::clear::shader_sources, gfx::tex_copy_conv::shader_sources,
                              gfx::tex_palette_conv::shader_sources, gpu::shader_sources, imgui::shader_sources}) {
       for (auto& source : list()) {
         add(std::move(source));

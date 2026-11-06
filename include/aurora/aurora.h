@@ -116,6 +116,10 @@ typedef struct {
    * resized. 0 stretches them to the window.
    */
   float displayAspect;
+  /**
+   * Ambient occlusion (GTAO) over the 3D world, from its depth.
+   */
+  bool ambientOcclusion;
 } AuroraConfig;
 
 typedef struct {

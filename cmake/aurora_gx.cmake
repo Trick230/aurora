@@ -1,4 +1,5 @@
 add_library(aurora_gx STATIC
+        lib/gfx/ambient_occlusion.cpp
         lib/gfx/clear.cpp
         lib/gfx/common.cpp
         lib/gfx/frame_interp.cpp

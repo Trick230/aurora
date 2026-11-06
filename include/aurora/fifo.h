@@ -55,6 +55,8 @@ typedef struct AuroraFifoConfig {
   bool stats;
   // Never shows the window; everything still renders.
   bool hidden;
+  // Ambient occlusion (GTAO) over the 3D world.
+  bool ambient_occlusion;
 } AuroraFifoConfig;
 
 // Starts the render thread and waits until Aurora is up and every pipeline

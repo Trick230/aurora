@@ -279,6 +279,7 @@ void RenderThread(std::atomic<int>* started)
   config.presentRate = s_config.present_rate;
   config.displayAspect = s_config.aspect;
   config.msaa = s_config.msaa;
+  config.ambientOcclusion = s_config.ambient_occlusion;
   config.renderScale = s_config.render_scale;
   // 16x on every mipmapped texture, not only where the game asks for it.
   config.maxTextureAnisotropy = 16;
