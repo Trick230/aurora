@@ -498,9 +498,12 @@ public:
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     VmaAllocationCreateInfo memory{};
     memory.usage = VMA_MEMORY_USAGE_AUTO;
-    if (desc.memory == MemoryKind::Upload)
+    if (desc.memory == MemoryKind::Upload) {
+      // System memory, as D3D12's upload heap: left to itself VMA picks the
+      // CPU-visible VRAM, where the CPU's writes cross the bus.
+      memory.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
       memory.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    else if (desc.memory == MemoryKind::Readback)
+    } else if (desc.memory == MemoryKind::Readback)
       memory.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     auto buffer = std::make_unique<VulkanBuffer>();
     VmaAllocationInfo allocated{};
