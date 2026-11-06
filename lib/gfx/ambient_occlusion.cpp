@@ -3,6 +3,7 @@
 #include "../gpu/gpu.hpp"
 #include "../internal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -22,7 +23,8 @@
 // in any game's units. It fades out toward the far plane and into the game's
 // own fog, which covers what it hides. Thin occluders (hair, poles) count less
 // the further in front they are, as XeGTAO's thin occluder compensation;
-// layers a texel or two above a surface (hair over a head) cast nothing; and
+// layers a texel or two above a surface, or the game's own minimum height
+// (hair over a head), cast nothing; and
 // where few neighbours share a pixel's depth (foliage, edges) the occlusion
 // gives way rather than leave the noise pattern.
 
@@ -38,7 +40,8 @@ constexpr float FadeStart = 0.25f;  // of the distance to the far plane
 constexpr float FadeEnd = 0.6f;
 constexpr float ThinOccluders = 0.7f; // how much depth in front of a pixel stretches a sample's distance
 constexpr float Power = 1.5f;          // deepens the occlusion where there is some, as XeGTAO's final power
-constexpr float MinHeight = 2.0f;      // in occlusion texels: what stands less above the surface casts nothing
+constexpr float MinHeight = 2.0f;      // in occlusion texels: what stands less above the surface casts nothing,
+                                       // and the config's ambientOcclusionMinHeight in view space
 
 struct Params {
   float viewport[4]; // left, top, width, height in EFB pixels
@@ -47,7 +50,7 @@ struct Params {
   float size[4];     // EFB width, height, occlusion scale, unused
   float tune[4];     // radius, strength, fade start, fade end
   float fog[4];      // GX fog type (0: none), a, b, c
-  float thin[4];     // thin occluder compensation, power, minimum height, unused
+  float thin[4];     // thin occluder compensation, power, minimum height in texels and in view space
 };
 
 constexpr std::string_view ParamsStruct = R"(
@@ -247,7 +250,7 @@ float fs_main(VertexOutput input) : SV_Target {
                 float weight = saturate(stretched * falloffMul + falloffAdd);
                 // A layer just above the surface (hair over a head, a decal
                 // over a wall) would draw a dark line along its edge.
-                float minHeight = params.thin.z * pxToView * float(scale);
+                float minHeight = max(params.thin.z * pxToView * float(scale), params.thin.w);
                 weight *= saturate(dot(delta, N) / minHeight - 1.0);
                 if (side == 0)
                     horizon0 = max(horizon0, lerp(low0, cosH, weight));
@@ -542,7 +545,7 @@ Range push_params(const Mat4x4<float>& proj, const Viewport& viewport, const Ext
                static_cast<float>(occlusion_scale(target)), 0.f},
       .tune = {Radius, Strength, FadeStart, FadeEnd},
       .fog = {static_cast<float>(fog.type), fog.a, fog.b, fog.c},
-      .thin = {ThinOccluders, Power, MinHeight, 0.f},
+      .thin = {ThinOccluders, Power, MinHeight, std::max(g_config.ambientOcclusionMinHeight, 0.f)},
   };
   return push_uniform(params);
 }

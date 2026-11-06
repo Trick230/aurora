@@ -120,6 +120,12 @@ typedef struct {
    * Ambient occlusion (GTAO) over the 3D world, from its depth.
    */
   bool ambientOcclusion;
+  /**
+   * What stands less than this above a surface casts no occlusion, in the
+   * game's view-space units (a few texels' worth always applies): the layers
+   * a model is built from, such as hair over a head. 0 for none.
+   */
+  float ambientOcclusionMinHeight;
 } AuroraConfig;
 
 typedef struct {

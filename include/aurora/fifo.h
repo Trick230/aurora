@@ -57,6 +57,8 @@ typedef struct AuroraFifoConfig {
   bool hidden;
   // Ambient occlusion (GTAO) over the 3D world.
   bool ambient_occlusion;
+  // AuroraConfig::ambientOcclusionMinHeight.
+  float ambient_occlusion_min_height;
 } AuroraFifoConfig;
 
 // Starts the render thread and waits until Aurora is up and every pipeline
