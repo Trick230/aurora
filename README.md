@@ -261,8 +261,17 @@ the game through and taking the resulting `pipeline_cache.db`
 (DualizeRecomp's `scripts/pipeline_seed.py` merges several). A seed made with
 MSAA on serves MSAA off too.
 
-A pipeline the cache has never seen still compiles mid-play, and its draws
-are skipped until it is ready (the stats line counts them). Changes to the
+The build can ship the seed's shaders compiled as well:
+`aurora_shader_pack <initial_pipeline_cache.db> <dir>` writes
+`shaders_d3d12.bin` and `shaders_vulkan.bin` with every seed pipeline's
+shaders, the ubershader's and aurora's own, to go next to the executable.
+With them a first start never runs DXC. What a machine compiles itself is kept
+in `<cache_path>/shaders_<backend>.bin`; both files are dropped when the
+compiler or its arguments change.
+
+A pipeline the cache has never seen still compiles mid-play; until it is
+ready its draws go through the ubershader, which runs any GX setup from a
+uniform block, so nothing pops in (the stats line counts them). Changes to the
 pipeline key (`GXPipelineConfigVersion` in `lib/gx/pipeline.hpp`) invalidate
 every cache and seed, so bump it only when the layout really changes.
 
@@ -309,16 +318,13 @@ With `stats` on, a line a second on stderr:
 | `cpu waits` | Time the game's thread waited on a full ring or a drain |
 | `frame ms`, `sd`, `max` | Intervals between the game's frames |
 | `interpolated presents` | Replays shown, the share of draws blended, the time each took, and the hitches (starved, late) |
-| `pipelines compiled`, `draws skipped compiling` | Pipelines built this second, and draws skipped for one still compiling |
+| `pipelines compiled`, `draws skipped compiling`, `by the ubershader` | Pipelines built this second, draws skipped for want of a pipeline, and draws the ubershader drew while theirs compiled |
 
 `aurora_get_stats()` (`include/aurora/gfx.h`) returns the running totals.
 
 ## Limitations
 
 - **One renderer per process.** The FIFO host is a single instance.
-- **New pipelines pop in.** A draw whose pipeline is still compiling is
-  skipped for those frames. The cache and seed cover what has been played; a
-  pipeline nothing has seen still compiles mid-play.
 - **MSAA is 1x or 4x** for now; 8x is planned.
 - **EFB copies stay on the GPU.** Textures the game samples from a copy's
   address use the copy, but its pixels never reach guest memory, so a game
