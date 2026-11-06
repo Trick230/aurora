@@ -8,6 +8,8 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 struct SDL_Window;
 
@@ -69,4 +71,6 @@ const TextureWithSampler& resample_present_source(rhi::CommandList& list, const 
 // A pipeline's shaders from one HLSL source with vs_main and fs_main; fatal if it
 // doesn't compile, since these sources are ours.
 rhi::ShaderCode compile_shader(rhi::ShaderStage stage, const std::string& source, const char* entry);
+// The HLSL sources of the present pipelines, for shipping them compiled.
+std::vector<std::string> shader_sources();
 } // namespace aurora::gpu

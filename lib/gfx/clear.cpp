@@ -59,4 +59,6 @@ void render(const DrawData& data, rhi::CommandList& list, const Extent3D& target
   list.set_scissor(data.rect.x, data.rect.y, data.rect.width, data.rect.height);
   list.draw(3, 0);
 }
+std::vector<std::string> shader_sources() { return {ClearShader}; }
+
 } // namespace aurora::gfx::clear

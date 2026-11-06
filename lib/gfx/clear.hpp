@@ -23,4 +23,6 @@ static_assert(std::has_unique_object_representations_v<PipelineConfig>);
 
 std::shared_ptr<rhi::RenderPipeline> create_pipeline(const PipelineConfig& config);
 void render(const DrawData& data, rhi::CommandList& list, const Extent3D& targetSize);
+// The HLSL sources of its pipelines, for shipping them compiled.
+std::vector<std::string> shader_sources();
 } // namespace aurora::gfx::clear

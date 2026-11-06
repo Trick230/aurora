@@ -20,5 +20,7 @@ struct ConvRequest {
 void initialize();
 void shutdown();
 void run(rhi::CommandList& list, const ConvRequest& req);
+// The HLSL sources of its pipelines, for shipping them compiled.
+std::vector<std::string> shader_sources();
 
 } // namespace aurora::gfx::tex_palette_conv

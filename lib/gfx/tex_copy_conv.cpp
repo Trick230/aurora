@@ -432,4 +432,19 @@ void run(rhi::CommandList& list, const ConvRequest& req) {
 
 void blit(rhi::CommandList& list, const ConvRequest& req) { execute(list, req, *g_blitPipeline); }
 
+std::vector<std::string> shader_sources() {
+  std::vector<std::string> sources;
+  sources.push_back(ShaderPreamble + std::string{FragPassthrough});
+  for (const auto& conv : ConvPipelines) {
+    sources.push_back(ShaderPreamble + std::string{conv.fragShader});
+  }
+  for (const bool multisampled : {true, false}) {
+    const std::string preamble = depth_preamble(multisampled);
+    for (const auto& conv : DepthConvPipelines) {
+      sources.push_back(preamble + std::string{conv.fragShader});
+    }
+  }
+  return sources;
+}
+
 } // namespace aurora::gfx::tex_copy_conv

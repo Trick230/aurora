@@ -138,4 +138,12 @@ void run(rhi::CommandList& list, const ConvRequest& req) {
   list.end_render_pass();
 }
 
+std::vector<std::string> shader_sources() {
+  std::vector<std::string> sources;
+  for (const auto fragment : {ShaderDirect, ShaderFromFloat8, ShaderFromFloat4}) {
+    sources.push_back(std::string{ShaderPreambleVtx} + std::string{fragment});
+  }
+  return sources;
+}
+
 } // namespace aurora::gfx::tex_palette_conv

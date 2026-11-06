@@ -5,7 +5,9 @@
 #include "rhi.hpp"
 
 #include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 union SDL_Event;
 
@@ -36,4 +38,6 @@ void process_event(const SDL_Event& event) noexcept;
 void new_frame(const AuroraWindowSize& size) noexcept;
 DrawData freeze() noexcept;
 void render(rhi::CommandList& list, rhi::Texture& target, const DrawData& drawData) noexcept;
+// The HLSL sources of its pipelines, for shipping them compiled.
+std::vector<std::string> shader_sources();
 } // namespace aurora::imgui

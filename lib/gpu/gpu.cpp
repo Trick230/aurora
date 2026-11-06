@@ -484,4 +484,8 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uin
   gfx::gpu_synchronize();
   resize_swapchain_internal(width, height, nativeWidth, nativeHeight, force);
 }
+std::vector<std::string> shader_sources() {
+  return {std::string{FullscreenVertex} + CopyShader, std::string{FullscreenVertex} + ResampleShader};
+}
+
 } // namespace aurora::gpu

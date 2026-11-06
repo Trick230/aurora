@@ -290,6 +290,8 @@ void render(rhi::CommandList& list, rhi::Texture& target, const DrawData& drawDa
   list.end_render_pass();
 }
 
+std::vector<std::string> shader_sources() { return {Shader}; }
+
 } // namespace aurora::imgui
 
 // C bindings

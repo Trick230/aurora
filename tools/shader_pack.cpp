@@ -1,10 +1,16 @@
-// Compiles, ahead of time, the shaders of a game's pipeline seed for every backend:
+// Compiles, ahead of time, the shaders of a game's pipeline seed and aurora's own
+// pipelines for every backend:
 // the shaders_<backend>.bin files aurora loads from its resources directory.
 // Usage: aurora_shader_pack <initial_pipeline_cache.db> <out dir>
+#include "../lib/gfx/clear.hpp"
 #include "../lib/gfx/common.hpp"
+#include "../lib/gfx/tex_copy_conv.hpp"
+#include "../lib/gfx/tex_palette_conv.hpp"
+#include "../lib/gpu/gpu.hpp"
 #include "../lib/gpu/shader_cache.hpp"
 #include "../lib/gx/pipeline.hpp"
 #include "../lib/gx/shader_hlsl.hpp"
+#include "../lib/imgui.hpp"
 
 #include <absl/container/flat_hash_set.h>
 #include <sqlite3.h>
@@ -72,18 +78,26 @@ int main(int argc, char** argv) {
   if (!read_configs(argv[1], &configs)) {
     return 1;
   }
-  // The sources the game builds for these pipelines, each once.
+  // The sources the game builds for these pipelines, each once, and aurora's own.
   std::vector<std::string> sources;
   {
     absl::flat_hash_set<std::string> seen;
-    for (const auto& config : configs) {
-      auto source = gx::hlsl::build_shader_source(config.shaderConfig, gx::dst_alpha_mode(config));
+    const auto add = [&](std::string source) {
       if (seen.insert(source).second) {
         sources.push_back(std::move(source));
       }
+    };
+    for (const auto& config : configs) {
+      add(gx::hlsl::build_shader_source(config.shaderConfig, gx::dst_alpha_mode(config)));
     }
     for (const auto mode : {gx::DstAlphaMode::None, gx::DstAlphaMode::Replace, gx::DstAlphaMode::DualSource}) {
-      sources.push_back(gx::hlsl::uber_source(mode));
+      add(gx::hlsl::uber_source(mode));
+    }
+    for (auto* const list : {gfx::clear::shader_sources, gfx::tex_copy_conv::shader_sources,
+                             gfx::tex_palette_conv::shader_sources, gpu::shader_sources, imgui::shader_sources}) {
+      for (auto& source : list()) {
+        add(std::move(source));
+      }
     }
   }
   std::vector<Job> jobs;
@@ -133,7 +147,7 @@ int main(int argc, char** argv) {
   }
   const auto ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-  std::printf("aurora_shader_pack: %zu pipelines, %zu sources, %zu shaders per backend in %lld ms\n", configs.size(),
+  std::printf("aurora_shader_pack: %zu GX pipelines, %zu sources, %zu shaders per backend in %lld ms\n", configs.size(),
               sources.size(), jobs.size(), static_cast<long long>(ms));
   return 0;
 }
