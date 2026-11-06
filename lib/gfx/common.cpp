@@ -146,6 +146,8 @@ struct RenderPass {
   bool aoResolvedOnly = false; // applied to the resolve target alone
   Range aoParams;
   ClipRect aoRect;
+  // Its copy is sampled later in the same frame, so replays redo it.
+  bool copyReadInFrame = false;
 };
 
 struct FrameOp {
@@ -200,6 +202,12 @@ struct AoState {
   ao::Fog fog;
 };
 static AoState g_ao;
+
+// The frame's copies nothing has sampled since: target texture and pass.
+static std::vector<std::pair<const rhi::Texture*, uint32_t>> g_unreadCopies;
+// While interpolation replays a frame: copies nothing in it samples keep what
+// the frame itself made (the game's state, for the next frame) and aren't redone.
+static bool g_replayingFrame = false;
 
 static void set_efb_targets(RenderPass& pass) {
   const bool multisampled = gpu::g_graphicsConfig.msaaSamples > 1;
@@ -466,6 +474,11 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   if (clearDepth) {
     g_ao = {};
   }
+  if (texture) {
+    const rhi::Texture* target = texture->texture.get();
+    std::erase_if(g_unreadCopies, [target](const auto& entry) { return entry.first == target; });
+    g_unreadCopies.emplace_back(target, g_currentRenderPass);
+  }
   prevPass.resolveTarget = std::move(texture);
   prevPass.resolveRect = rect;
   prevPass.resolveFormat = resolveFormat;
@@ -535,6 +548,20 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   }
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
+}
+
+void note_copy_sampled(const TextureHandle& texture) {
+  if (!texture || g_recordingFrame == nullptr) {
+    return;
+  }
+  const rhi::Texture* target = texture->texture.get();
+  for (auto it = g_unreadCopies.begin(); it != g_unreadCopies.end(); ++it) {
+    if (it->first == target) {
+      current_render_passes()[it->second].copyReadInFrame = true;
+      g_unreadCopies.erase(it);
+      return;
+    }
+  }
 }
 
 void queue_palette_conv(tex_palette_conv::ConvRequest req) {
@@ -755,6 +782,7 @@ bool begin_frame() {
   auto& pass = current_render_passes()[0];
   set_efb_targets(pass);
   g_ao = {};
+  g_unreadCopies.clear();
   pass.clearColorValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
   g_currentRenderPass = 0;
@@ -980,12 +1008,13 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
   if (draws) {
     g_resolvedColor.reset();
   }
+  const bool copy = passInfo.resolveTarget && (!g_replayingFrame || passInfo.copyReadInFrame);
   const bool resolved = passInfo.resolveTexture && g_resolvedColor.lock() == passInfo.colorTexture;
   // With ambient occlusion over the multisampled color, its pass resolves it.
   const bool resolve = passInfo.resolveTexture && !resolved &&
                        !(passInfo.ambientOcclusion && !passInfo.aoResolvedOnly) &&
                        (passInfo.observable || passInfo.aoResolvedOnly ||
-                        (passInfo.resolveTarget && !gx::is_depth_format(passInfo.resolveFormat)));
+                        (copy && !gx::is_depth_format(passInfo.resolveFormat)));
   // With nothing to draw, clear or resolve, only the copy.
   if (draws || passInfo.clearDepth || resolve || passInfo.ambientOcclusion) {
     rhi::RenderPassDesc passDesc;
@@ -1025,7 +1054,7 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
   }
   }
 
-  if (passInfo.resolveTarget) {
+  if (copy) {
     const auto& dstSize = passInfo.resolveTarget->size;
     const bool needsConversion = tex_copy_conv::needs_conversion(passInfo.resolveFormat);
     const bool needsScaling = dstSize.width != static_cast<uint32_t>(passInfo.resolveRect.width) ||
@@ -1056,11 +1085,13 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
 }
 
 static void replay_frame(rhi::CommandList& list, FramePacket& frame) {
+  g_replayingFrame = true;
   for (const auto& op : frame.ops) {
     if (op.renderPass != nullptr) {
       render(list, frame, *op.renderPass);
     }
   }
+  g_replayingFrame = false;
 }
 
 void interp::record_draw(const DrawRecord& record) { current_frame_packet().interpDraws.push_back(record); }

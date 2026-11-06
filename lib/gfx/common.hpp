@@ -250,6 +250,8 @@ namespace tex_palette_conv {
 struct ConvRequest;
 } // namespace tex_palette_conv
 void queue_palette_conv(tex_palette_conv::ConvRequest req);
+// A draw or conversion in the frame being recorded samples this copy target.
+void note_copy_sampled(const TextureHandle& texture);
 
 Range push_verts(const uint8_t* data, size_t length, size_t alignment);
 // The frame's index staging, its end aligned to alignment, for indices

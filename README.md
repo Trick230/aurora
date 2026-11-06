@@ -241,6 +241,9 @@ produced, so nothing is predicted.
   texture's offset wraps.
 - Lights and post-transform texture matrices (projected shadows) move with
   the camera.
+- Replays redo only the EFB copies something later in the same frame
+  samples; the rest keep what the game's own frame made, which is also what
+  the next frame should read.
 
 **Naming the camera.** On its own Aurora estimates the camera's move from
 the draws and guesses which objects stand in the world and which follow the

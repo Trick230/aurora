@@ -45,5 +45,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto clearDepth = clear && g_gxState.depthUpdate;
   gfx::resolve_pass(copy.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor, clear_depth_value(),
                     texCopyFmt, !efbAlpha);
+  // Draws after it look their textures up again, which notes the copies they sample.
+  g_gxState.stateDirty = true;
 }
 } // namespace aurora::gx
