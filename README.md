@@ -231,6 +231,22 @@ The producer is the one thread that submits: the game's CPU thread.
 | `render_scale` | The frame buffer's size over the window's: 1 renders at the window's size, above it renders larger and reduces with an area filter |
 | `dump_textures` | Writes each texture no pack replaces to `<cache_path>/texture_dumps` |
 | `stats` | One line of counters per second on stderr (see [Statistics](#statistics)) |
+| `hidden` | Never shows the window; everything still renders (scripted runs) |
+| `ambient_occlusion` | GTAO over the 3D world (see [Features](#features)) |
+| `ambient_occlusion_min_height` | What stands less than this above a surface casts no occlusion, in the game's view-space units: the layers a model is built from, such as hair over a head. 0 for none |
+
+Environment variables, for testing and debugging:
+
+| Variable | Effect |
+|---|---|
+| `AURORA_BACKEND=vulkan` | Vulkan instead of D3D12 on Windows |
+| `RHI_VALIDATION=1` | The API's validation layer (D3D12 debug layer, Vulkan validation) |
+| `AURORA_FRAME_DUMP=<dir>` | Each frame's hash to `hashes.txt` there, and every 30th frame's pixels, to compare renderers by numbers |
+| `AURORA_SYNC_PIPELINES=1` | A draw waits for its pipeline instead of going through the ubershader, so cold and warm runs render alike |
+| `AURORA_FORCE_UBERSHADER=1` | Every draw through the ubershader (`2`: every other pipeline), to check it against the generated shaders |
+| `AURORA_HLSL_DUMP=<dir>` | The HLSL of every pipeline the game asks for, the corpus for `tests/rhi`'s shader check |
+| `AURORA_INTERP_NOBLEND=1` | Replays without blending, to compare |
+| `AURORA_INTERP_CHECK=<dir>` | PPM pairs that must match: the older frame replayed at t = 1 and the newer at t = 0 |
 
 ## Frame interpolation
 
