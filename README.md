@@ -62,6 +62,8 @@ Which Aurora to use:
 **Image quality**
 
 - MSAA up to 8x (what the GPU does), with depth copies resolved from sample 0.
+  The color is resolved only when a color copy or the display needs it and
+  something was drawn since the last time.
 - Alpha to coverage under MSAA for unblended alpha-test cutouts, where the
   EFB keeps no alpha.
 - A render scale above the window's size, reduced with an area (box) filter

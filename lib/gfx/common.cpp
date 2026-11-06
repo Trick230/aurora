@@ -955,6 +955,11 @@ static void encode_op(rhi::CommandList& list, FramePacket& frame, const FrameOp&
 
 static void render_pass(rhi::CommandList& list, RenderPass& passInfo);
 
+// The multisampled color the resolve target holds as it is now; empty once
+// that color is drawn to. Copies in a row with nothing drawn between them
+// resolve it once, and depth copies, which read the depth, not at all.
+static std::weak_ptr<rhi::Texture> g_resolvedColor;
+
 static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passInfo) {
   if (!passInfo.sealed) {
     return;
@@ -968,32 +973,56 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
     return;
   }
 
-  rhi::RenderPassDesc passDesc;
-  passDesc.color.target = passInfo.colorTexture.get();
+  bool draws = passInfo.clearColor;
+  for (const auto& cmd : passInfo.commands) {
+    draws = draws || cmd.type == CommandType::Draw;
+  }
+  if (draws) {
+    g_resolvedColor.reset();
+  }
+  const bool resolved = passInfo.resolveTexture && g_resolvedColor.lock() == passInfo.colorTexture;
   // With ambient occlusion over the multisampled color, its pass resolves it.
-  passDesc.color.resolve =
-      passInfo.ambientOcclusion && !passInfo.aoResolvedOnly ? nullptr : passInfo.resolveTexture.get();
-  passDesc.color.clear = passInfo.clearColor;
-  passDesc.color.clear_color = {passInfo.clearColorValue.x(), passInfo.clearColorValue.y(),
-                                passInfo.clearColorValue.z(), passInfo.clearColorValue.w()};
-  passDesc.depth.target = passInfo.depthTexture.get();
-  passDesc.depth.clear = passInfo.clearDepth;
-  passDesc.depth.clear_depth = passInfo.clearDepthValue;
-  list.begin_render_pass(passDesc);
-  render_pass(list, passInfo);
-  list.end_render_pass();
-  if (passInfo.ambientOcclusion) {
-    ao::apply(list, {
-                        .color = passInfo.aoResolvedOnly ? passInfo.resolveTexture.get()
-                                                         : passInfo.colorTexture.get(),
-                        .resolve = passInfo.aoResolvedOnly ? nullptr : passInfo.resolveTexture.get(),
-                        .depth = passInfo.copySourceDepthView.get(),
-                        .samples = passInfo.aoResolvedOnly ? 1 : passInfo.msaaSamples,
-                        .depthSamples = passInfo.msaaSamples,
-                        .size = passInfo.targetSize,
-                        .rect = passInfo.aoRect,
-                        .params = passInfo.aoParams,
-                    });
+  const bool resolve = passInfo.resolveTexture && !resolved &&
+                       !(passInfo.ambientOcclusion && !passInfo.aoResolvedOnly) &&
+                       (passInfo.observable || passInfo.aoResolvedOnly ||
+                        (passInfo.resolveTarget && !gx::is_depth_format(passInfo.resolveFormat)));
+  // With nothing to draw, clear or resolve, only the copy.
+  if (draws || passInfo.clearDepth || resolve || passInfo.ambientOcclusion) {
+    rhi::RenderPassDesc passDesc;
+    passDesc.color.target = passInfo.colorTexture.get();
+    passDesc.color.resolve = resolve ? passInfo.resolveTexture.get() : nullptr;
+    passDesc.color.clear = passInfo.clearColor;
+    passDesc.color.clear_color = {passInfo.clearColorValue.x(), passInfo.clearColorValue.y(),
+                                  passInfo.clearColorValue.z(), passInfo.clearColorValue.w()};
+    passDesc.depth.target = passInfo.depthTexture.get();
+    passDesc.depth.clear = passInfo.clearDepth;
+    passDesc.depth.clear_depth = passInfo.clearDepthValue;
+    list.begin_render_pass(passDesc);
+    render_pass(list, passInfo);
+    list.end_render_pass();
+    if (resolve) {
+      g_resolvedColor = passInfo.colorTexture;
+    }
+    if (passInfo.ambientOcclusion) {
+      ao::apply(list, {
+                          .color = passInfo.aoResolvedOnly ? passInfo.resolveTexture.get()
+                                                           : passInfo.colorTexture.get(),
+                          .resolve = passInfo.aoResolvedOnly ? nullptr : passInfo.resolveTexture.get(),
+                          .depth = passInfo.copySourceDepthView.get(),
+                          .samples = passInfo.aoResolvedOnly ? 1 : passInfo.msaaSamples,
+                          .depthSamples = passInfo.msaaSamples,
+                          .size = passInfo.targetSize,
+                          .rect = passInfo.aoRect,
+                          .params = passInfo.aoParams,
+                      });
+      // Over the multisampled color it resolves it; over the resolve target
+      // alone, the two differ.
+      if (passInfo.aoResolvedOnly) {
+        g_resolvedColor.reset();
+      } else {
+        g_resolvedColor = passInfo.colorTexture;
+      }
+  }
   }
 
   if (passInfo.resolveTarget) {
