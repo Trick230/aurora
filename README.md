@@ -69,7 +69,7 @@ Which Aurora to use:
 - A render scale above the window's size, reduced with an area (box) filter
   so every rendered pixel counts.
 - 16x anisotropic filtering on every mipmapped texture.
-- Ambient occlusion (`ambientOcclusion`): GTAO from the EFB's depth, 2 slices
+- Ambient occlusion (`ambientOcclusion`): GTAO from the EFB's depth, 4 slices
   of 3 steps a side under a 4x4 noise pattern that a depth-weighted 4x4
   average removes, at full resolution up to a 720-line EFB and half above,
   then upsampled by depth. The depth is linearized once, so the multisampled

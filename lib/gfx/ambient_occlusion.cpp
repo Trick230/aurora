@@ -144,7 +144,7 @@ float fs_main(VertexOutput input) : SV_Target {
 
 constexpr std::string_view OcclusionShader = R"(
 static const float Pi = 3.14159265;
-static const uint Slices = 2;
+static const uint Slices = 4;
 static const uint Steps = 3;
 static const float Bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
 
