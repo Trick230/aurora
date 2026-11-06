@@ -464,7 +464,10 @@ void aurora_fifo_drain(void)
   const auto deadline = start + std::chrono::seconds(5);
   while (s_ring.settled.load(std::memory_order_acquire) < target)
   {
-    if (s_stop.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() > deadline)
+    // Stopped: the window closed and the game is on its way out.
+    if (s_stop.load(std::memory_order_relaxed))
+      return;
+    if (std::chrono::steady_clock::now() > deadline)
     {
       std::fprintf(stderr, "[gx] drain timed out; markers may be lost\n");
       return;
