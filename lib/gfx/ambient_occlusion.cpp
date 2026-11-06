@@ -14,10 +14,13 @@
 // rotates the slices and staggers the steps; a depth-weighted average of each
 // 4x4 block cancels it without blurring across edges.
 //
-// Four passes, the first three at the occlusion's resolution: the view depth,
-// read once from the (multisampled) EFB depth; the occlusion; the average,
-// packed into the depth; and over the EFB, a depth-weighted 2x2 upsample that
-// multiplies the color and resolves it.
+// Five passes, the first four at the occlusion's resolution: the view depth,
+// read once from the (multisampled) EFB depth; the EFB's color; the occlusion;
+// the average, packed into the depth; and over the EFB, a depth-weighted 2x2
+// upsample that multiplies the color and resolves it. The color gives the
+// light a surface bounces into its own creases, as GTAO's multi-bounce fit:
+// a bright surface's corners darken less than a dark one's. The EFB's color
+// is lit, not albedo, which suits it: what bounces is the light there is.
 //
 // The radius is a share of the viewport's height, so the effect looks alike
 // in any game's units. It fades out toward the far plane and into the game's
@@ -141,6 +144,14 @@ float fs_main(VertexOutput input) : SV_Target {
         return 0.0;
     float d = load_depth(c);
     return is_geometry(d) ? view_z(d) : 0.0;
+}
+)";
+
+// The EFB's color at each occlusion pixel, from the same EFB pixel as its depth.
+constexpr std::string_view ColorShader = R"(
+float4 fs_main(VertexOutput input) : SV_Target {
+    int scale = int(params.size.z);
+    return load_color(clamp_px(int2(input.pos.xy) * scale + scale / 2));
 }
 )";
 
@@ -327,6 +338,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
     float2 cell = floor(f);
     float2 frac2 = f - cell;
     float sum = 0.0, weights = 0.0, nearestAo = 1.0, nearestDz = 3.4e38;
+    float3 colorSum = 0.0, nearestColor = 0.0;
     [unroll]
     for (int y = 0; y < 2; ++y) {
         [unroll]
@@ -337,20 +349,29 @@ float4 fs_main(VertexOutput input) : SV_Target {
             if (!(tz < 0.0))
                 continue;
             float ao = float(packed & 0xFFu) / 255.0;
+            float3 color = colors.Load(int3(t, 0)).rgb;
             float dz = abs(tz - z0);
             float2 b = lerp(1.0 - frac2, frac2, float2(x, y));
             float w = b.x * b.y * exp2(-dz / (abs(z0) * 0.02));
             sum += ao * w;
+            colorSum += color * w;
             weights += w;
             if (dz < nearestDz) {
                 nearestDz = dz;
                 nearestAo = ao;
+                nearestColor = color;
             }
         }
     }
     // No texel on this surface (a thin edge): the nearest in depth.
     float ao = weights > 1e-3 ? sum / weights : nearestAo;
-    return float4(ao, ao, ao, 1.0);
+    float3 color = weights > 1e-3 ? colorSum / weights : nearestColor;
+    // Multi-bounce (Jimenez et al. 2016), on the color made roughly linear.
+    float3 albedo = color * color;
+    float3 k0 = 2.0404 * albedo - 0.3324;
+    float3 k1 = -4.7951 * albedo + 0.6417;
+    float3 k2 = 2.7552 * albedo + 0.6903;
+    return float4(max(ao, ((ao * k0 + k1) * ao + k2) * ao), 1.0);
 }
 )";
 
@@ -359,6 +380,15 @@ std::string depth_access(bool multisampled) {
                         "float load_depth(int2 p) { return depth_tex.Load(p, 0); }\n"
                       : "Texture2D<float> depth_tex : register(t0, space0);\n"
                         "float load_depth(int2 p) { return depth_tex.Load(int3(p, 0)); }\n";
+}
+
+std::string color_source(bool multisampled) {
+  return std::string{ParamsStruct} +
+         (multisampled ? "Texture2DMS<float4> color_tex : register(t0, space0);\n"
+                         "float4 load_color(int2 p) { return color_tex.Load(p, 0); }\n"
+                       : "Texture2D<float4> color_tex : register(t0, space0);\n"
+                         "float4 load_color(int2 p) { return color_tex.Load(int3(p, 0)); }\n") +
+         "ConstantBuffer<AoParams> params : register(b1, space0);\n" + std::string{Common} + std::string{ColorShader};
 }
 
 std::string linearize_source(bool multisampled) {
@@ -382,7 +412,8 @@ std::string blur_source() {
 std::string apply_source(bool multisampled) {
   return std::string{ParamsStruct} + depth_access(multisampled) +
          "Texture2D<float> blurred : register(t1, space0);\n" +
-         "ConstantBuffer<AoParams> params : register(b2, space0);\n" + std::string{Common} + std::string{ApplyShader};
+         "Texture2D<float4> colors : register(t2, space0);\n" +
+         "ConstantBuffer<AoParams> params : register(b3, space0);\n" + std::string{Common} + std::string{ApplyShader};
 }
 
 using Pipeline = std::unique_ptr<rhi::RenderPipeline>;
@@ -390,8 +421,11 @@ using Pipeline = std::unique_ptr<rhi::RenderPipeline>;
 bool g_enabled = false;
 std::unique_ptr<rhi::BindGroupLayout> g_occlusionGroupLayout;
 std::unique_ptr<rhi::BindGroupLayout> g_applyGroupLayout;
+std::unique_ptr<rhi::BindGroupLayout> g_colorGroupLayout; // the apply's: depth, occlusion, color, params
 std::unique_ptr<rhi::PipelineLayout> g_occlusionLayout;
 std::unique_ptr<rhi::PipelineLayout> g_applyLayout;
+std::unique_ptr<rhi::PipelineLayout> g_colorLayout;
+std::array<Pipeline, 2> g_colorPipelines; // by whether the color is multisampled
 std::array<Pipeline, 2> g_linearizePipelines; // by whether the depth is multisampled
 Pipeline g_occlusionPipeline;
 Pipeline g_blurPipeline;
@@ -402,6 +436,8 @@ std::shared_ptr<rhi::Texture> g_linear; // the view depth, R32Float
 std::unique_ptr<rhi::TextureView> g_linearView;
 std::shared_ptr<rhi::Texture> g_blurred; // the blurred occlusion in the view depth, R32Float
 std::unique_ptr<rhi::TextureView> g_blurredView;
+std::unique_ptr<rhi::Texture> g_color;
+std::unique_ptr<rhi::TextureView> g_colorView;
 uint32_t g_textureWidth = 0, g_textureHeight = 0;
 
 uint32_t occlusion_scale(const Extent3D& target) { return target.height > FullResolutionMaxHeight ? 2 : 1; }
@@ -439,7 +475,7 @@ Pipeline create(rhi::PipelineLayout* layout, const std::string& source, rhi::For
 rhi::RenderPipeline& apply_pipeline(uint32_t samples, bool multisampledDepth) {
   auto& pipeline = g_applyPipelines[sample_index(samples) * 2 + multisampledDepth];
   if (!pipeline) {
-    pipeline = create(g_applyLayout.get(), apply_source(multisampledDepth), gpu::g_graphicsConfig.surfaceFormat,
+    pipeline = create(g_colorLayout.get(), apply_source(multisampledDepth), gpu::g_graphicsConfig.surfaceFormat,
                       samples, true);
   }
   return *pipeline;
@@ -452,6 +488,7 @@ void ensure_texture(uint32_t width, uint32_t height) {
   g_view.reset();
   g_linearView.reset();
   g_blurredView.reset();
+  g_colorView.reset();
   g_texture = g_device->create_texture({
       .width = width,
       .height = height,
@@ -473,6 +510,13 @@ void ensure_texture(uint32_t width, uint32_t height) {
       .usage = rhi::TextureSampled | rhi::TextureColorTarget,
   });
   g_blurredView = g_blurred->create_view({});
+  g_color = g_device->create_texture({
+      .width = width,
+      .height = height,
+      .format = rhi::Format::RGBA8Unorm,
+      .usage = rhi::TextureSampled | rhi::TextureColorTarget,
+  });
+  g_colorView = g_color->create_view({});
   g_textureWidth = width;
   g_textureHeight = height;
 }
@@ -498,9 +542,20 @@ void initialize() {
   g_applyGroupLayout = g_device->create_bind_group_layout({applyEntries.data(), applyEntries.size()});
   rhi::BindGroupLayout* applyGroups[] = {g_applyGroupLayout.get()};
   g_applyLayout = g_device->create_pipeline_layout({applyGroups, 1});
+  const std::array colorEntries{
+      rhi::BindingLayout{0, rhi::BindingKind::Texture},
+      rhi::BindingLayout{1, rhi::BindingKind::Texture},
+      rhi::BindingLayout{2, rhi::BindingKind::Texture},
+      rhi::BindingLayout{3, rhi::BindingKind::Uniform},
+  };
+  g_colorGroupLayout = g_device->create_bind_group_layout({colorEntries.data(), colorEntries.size()});
+  rhi::BindGroupLayout* colorGroups[] = {g_colorGroupLayout.get()};
+  g_colorLayout = g_device->create_pipeline_layout({colorGroups, 1});
   const uint32_t samples = gpu::g_graphicsConfig.msaaSamples;
   g_linearizePipelines[samples > 1] =
       create(g_occlusionLayout.get(), linearize_source(samples > 1), rhi::Format::R32Float, 1, false);
+  g_colorPipelines[samples > 1] =
+      create(g_occlusionLayout.get(), color_source(samples > 1), rhi::Format::RGBA8Unorm, 1, false);
   g_occlusionPipeline = create(g_occlusionLayout.get(), occlusion_source(), rhi::Format::R8Unorm, 1, false);
   g_blurPipeline = create(g_applyLayout.get(), blur_source(), rhi::Format::R32Float, 1, false);
   apply_pipeline(samples, samples > 1);
@@ -516,8 +571,13 @@ void shutdown() {
   g_linear.reset();
   g_blurredView.reset();
   g_blurred.reset();
+  g_colorView.reset();
+  g_color.reset();
   g_textureWidth = g_textureHeight = 0;
   for (auto& pipeline : g_linearizePipelines) {
+    pipeline.reset();
+  }
+  for (auto& pipeline : g_colorPipelines) {
     pipeline.reset();
   }
   g_occlusionPipeline.reset();
@@ -527,8 +587,10 @@ void shutdown() {
   }
   g_occlusionLayout.reset();
   g_applyLayout.reset();
+  g_colorLayout.reset();
   g_occlusionGroupLayout.reset();
   g_applyGroupLayout.reset();
+  g_colorGroupLayout.reset();
   g_enabled = false;
 }
 
@@ -561,24 +623,29 @@ void apply(rhi::CommandList& list, const Target& target) {
     linearizePipeline =
         create(g_occlusionLayout.get(), linearize_source(multisampled), rhi::Format::R32Float, 1, false);
   }
+  const bool multisampledColor = target.samples > 1;
+  auto& colorPipeline = g_colorPipelines[multisampledColor];
+  if (!colorPipeline) {
+    colorPipeline =
+        create(g_occlusionLayout.get(), color_source(multisampledColor), rhi::Format::RGBA8Unorm, 1, false);
+  }
 
-  // A full-screen pass reading one or two textures.
-  const auto pass = [&](rhi::RenderPipeline& pipeline, rhi::TextureView* first, rhi::TextureView* second,
+  // A full-screen pass reading one to three textures.
+  const auto pass = [&](rhi::RenderPipeline& pipeline, std::initializer_list<rhi::TextureView*> views,
                         rhi::Texture* output, rhi::Texture* resolve) {
-    std::array<rhi::BindingValue, 3> values{};
-    values[0].binding = 0;
-    values[0].view = first;
-    uint32_t count = 1;
-    if (second != nullptr) {
-      values[count].binding = 1;
-      values[count++].view = second;
+    std::array<rhi::BindingValue, 4> values{};
+    uint32_t count = 0;
+    for (auto* view : views) {
+      values[count].binding = count;
+      values[count++].view = view;
     }
-    values[count].binding = second != nullptr ? 2 : 1;
+    values[count].binding = count;
     values[count].buffer = g_uniformBuffer;
     values[count].offset = target.params.offset;
     values[count++].size = target.params.size;
-    const auto group = g_device->create_bind_group(
-        {second != nullptr ? g_applyGroupLayout.get() : g_occlusionGroupLayout.get(), values.data(), count});
+    rhi::BindGroupLayout* layouts[] = {g_occlusionGroupLayout.get(), g_applyGroupLayout.get(),
+                                       g_colorGroupLayout.get()};
+    const auto group = g_device->create_bind_group({layouts[views.size() - 1], values.data(), count});
     rhi::RenderPassDesc desc;
     desc.color.target = output;
     desc.color.resolve = resolve;
@@ -592,15 +659,16 @@ void apply(rhi::CommandList& list, const Target& target) {
     list.draw(3, 0);
     list.end_render_pass();
   };
-  pass(*linearizePipeline, target.depth, nullptr, g_linear.get(), nullptr);
-  pass(*g_occlusionPipeline, g_linearView.get(), nullptr, g_texture.get(), nullptr);
-  pass(*g_blurPipeline, g_linearView.get(), g_view.get(), g_blurred.get(), nullptr);
-  pass(apply_pipeline(target.samples, multisampled), target.depth, g_blurredView.get(), target.color,
-       target.resolve);
+  pass(*linearizePipeline, {target.depth}, g_linear.get(), nullptr);
+  pass(*colorPipeline, {target.colorView}, g_color.get(), nullptr);
+  pass(*g_occlusionPipeline, {g_linearView.get()}, g_texture.get(), nullptr);
+  pass(*g_blurPipeline, {g_linearView.get(), g_view.get()}, g_blurred.get(), nullptr);
+  pass(apply_pipeline(target.samples, multisampled), {target.depth, g_blurredView.get(), g_colorView.get()},
+       target.color, target.resolve);
 }
 
 std::vector<std::string> shader_sources() {
-  return {linearize_source(false), linearize_source(true), occlusion_source(), blur_source(), apply_source(false),
-          apply_source(true)};
+  return {linearize_source(false), linearize_source(true), color_source(false), color_source(true),
+          occlusion_source(),        blur_source(),           apply_source(false), apply_source(true)};
 }
 } // namespace aurora::gfx::ao

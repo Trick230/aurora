@@ -84,7 +84,10 @@ Which Aurora to use:
   a surface, or less than `ambientOcclusionMinHeight` in the game's units
   (hair over a head), casts nothing, where it would draw a dark line along
   its edge. No power over the visibility: above 1 it deepens creases into
-  outlines.
+  outlines. The EFB's color, read once at the occlusion's resolution, gives
+  GTAO's multi-bounce: a bright surface's creases darken less than a dark
+  one's, tinted by its color (0.16 ms more at 1440 lines). The color is lit,
+  not albedo, which suits it: what bounces is the light there is.
 - 8 bits a channel with no dithering; mip selection follows the render
   resolution.
 - A display aspect (4:3, 16:9) kept as the window is resized, letterboxed.

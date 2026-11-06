@@ -24,6 +24,7 @@ Range push_params(const Mat4x4<float>& proj, const Viewport& viewport, const Ext
 
 struct Target {
   rhi::Texture* color = nullptr;
+  rhi::TextureView* colorView = nullptr; // read before the occlusion goes over it
   rhi::Texture* resolve = nullptr; // with MSAA, the color's resolve target
   rhi::TextureView* depth = nullptr;
   uint32_t samples = 1;      // the color's

@@ -120,6 +120,7 @@ using CommandList = std::vector<Command>;
 
 struct RenderPass {
   std::shared_ptr<rhi::Texture> colorTexture;
+  std::shared_ptr<rhi::TextureView> colorView;
   std::shared_ptr<rhi::Texture> resolveTexture; // MSAA resolve target; null if msaaSamples == 1
   std::shared_ptr<rhi::Texture> depthTexture;
   std::shared_ptr<rhi::Texture> copySourceTexture;
@@ -212,6 +213,7 @@ static bool g_replayingFrame = false;
 static void set_efb_targets(RenderPass& pass) {
   const bool multisampled = gpu::g_graphicsConfig.msaaSamples > 1;
   pass.colorTexture = gpu::g_frameBuffer.texture;
+  pass.colorView = gpu::g_frameBuffer.view;
   pass.resolveTexture = multisampled ? gpu::g_frameBufferResolved.texture : nullptr;
   pass.depthTexture = gpu::g_depthBuffer.texture;
   pass.copySourceTexture = multisampled ? gpu::g_frameBufferResolved.texture : gpu::g_frameBuffer.texture;
@@ -441,6 +443,7 @@ static void note_draw_for_ambient_occlusion() {
   enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
   RenderPass newPass{
       .colorTexture = prevPass.colorTexture,
+      .colorView = prevPass.colorView,
       .resolveTexture = prevPass.resolveTexture,
       .depthTexture = prevPass.depthTexture,
       .copySourceTexture = prevPass.copySourceTexture,
@@ -514,6 +517,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   const bool fullColorClear = clearColor && clearAlpha && fullTarget;
   RenderPass newPass{
       .colorTexture = prevPass.colorTexture,
+      .colorView = prevPass.colorView,
       .resolveTexture = prevPass.resolveTexture,
       .depthTexture = prevPass.depthTexture,
       .copySourceTexture = prevPass.copySourceTexture,
@@ -1036,6 +1040,8 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
       ao::apply(list, {
                           .color = passInfo.aoResolvedOnly ? passInfo.resolveTexture.get()
                                                            : passInfo.colorTexture.get(),
+                          .colorView = passInfo.aoResolvedOnly ? passInfo.copySourceView.get()
+                                                               : passInfo.colorView.get(),
                           .resolve = passInfo.aoResolvedOnly ? nullptr : passInfo.resolveTexture.get(),
                           .depth = passInfo.copySourceDepthView.get(),
                           .samples = passInfo.aoResolvedOnly ? 1 : passInfo.msaaSamples,
