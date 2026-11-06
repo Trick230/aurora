@@ -78,7 +78,9 @@ Which Aurora to use:
   once per depth clear, and only for perspective viewports over half the EFB;
   replays recompute it. Its radius is a share of the viewport's height, so it
   suits any game's units; it fades toward the far plane and into the game's
-  fog, and thin occluders in front count less.
+  fog, thin occluders in front count less, and a layer a texel or two above
+  a surface (hair over a head) casts nothing, where it would draw a dark line
+  along its edge.
 - 8 bits a channel with no dithering; mip selection follows the render
   resolution.
 - A display aspect (4:3, 16:9) kept as the window is resized, letterboxed.
