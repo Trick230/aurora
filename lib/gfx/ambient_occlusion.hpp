@@ -13,9 +13,14 @@ void initialize();
 void shutdown();
 bool enabled() noexcept;
 
-// The uniform block for one application: the projection and viewport the world
-// was drawn with, and the EFB's size.
-Range push_params(const Mat4x4<float>& proj, const Viewport& viewport, const Extent3D& target);
+// The GX fog the world was drawn with: its type (0: none) and a, b, c.
+struct Fog {
+  uint32_t type = 0;
+  float a = 0.f, b = 0.f, c = 0.f;
+};
+// The uniform block for one application: the projection, viewport and fog the
+// world was drawn with, and the EFB's size.
+Range push_params(const Mat4x4<float>& proj, const Viewport& viewport, const Extent3D& target, const Fog& fog);
 
 struct Target {
   rhi::Texture* color = nullptr;

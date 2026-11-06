@@ -197,6 +197,7 @@ struct AoState {
   bool done = false;    // and has its occlusion
   Mat4x4<float> proj;   // what it was drawn with
   Viewport viewport;
+  ao::Fog fog;
 };
 static AoState g_ao;
 
@@ -401,7 +402,7 @@ static void add_ambient_occlusion(RenderPass& pass) {
     return;
   }
   pass.ambientOcclusion = true;
-  pass.aoParams = ao::push_params(g_ao.proj, vp, pass.targetSize);
+  pass.aoParams = ao::push_params(g_ao.proj, vp, pass.targetSize, g_ao.fog);
   pass.aoRect = {left, top, right - left, bottom - top};
 }
 
@@ -418,6 +419,7 @@ static void note_draw_for_ambient_occlusion() {
       g_ao.pending = true;
       g_ao.proj = state.proj;
       g_ao.viewport = vp;
+      g_ao.fog = {.type = static_cast<uint32_t>(state.fog.type), .a = state.fog.a, .b = state.fog.b, .c = state.fog.c};
     }
     return;
   }
@@ -968,7 +970,9 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
 
   rhi::RenderPassDesc passDesc;
   passDesc.color.target = passInfo.colorTexture.get();
-  passDesc.color.resolve = passInfo.resolveTexture.get();
+  // With ambient occlusion over the multisampled color, its pass resolves it.
+  passDesc.color.resolve =
+      passInfo.ambientOcclusion && !passInfo.aoResolvedOnly ? nullptr : passInfo.resolveTexture.get();
   passDesc.color.clear = passInfo.clearColor;
   passDesc.color.clear_color = {passInfo.clearColorValue.x(), passInfo.clearColorValue.y(),
                                 passInfo.clearColorValue.z(), passInfo.clearColorValue.w()};

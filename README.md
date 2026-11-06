@@ -67,14 +67,16 @@ Which Aurora to use:
 - A render scale above the window's size, reduced with an area (box) filter
   so every rendered pixel counts.
 - 16x anisotropic filtering on every mipmapped texture.
-- Ambient occlusion (`ambientOcclusion`): GTAO from the EFB's depth, 3 slices
-  of 4 steps a side under a 4x4 noise pattern that a depth-weighted 4x4
-  average removes, at full resolution up to a 1600-line EFB and half above.
-  It goes over the world once it is drawn, before the first 2D draw after it,
-  an EFB copy or the frame's end, once per depth clear, and only for
-  perspective viewports over half the EFB; replays recompute it. Its radius is
-  a share of the viewport's height, so it suits any game's units, and it fades
-  toward the far plane.
+- Ambient occlusion (`ambientOcclusion`): GTAO from the EFB's depth, 2 slices
+  of 3 steps a side under a 4x4 noise pattern that a depth-weighted 4x4
+  average removes, at full resolution up to a 720-line EFB and half above,
+  then upsampled by depth. The depth is linearized once, so the multisampled
+  buffer is read twice a pixel in all. It goes over the world once it is
+  drawn, before the first 2D draw after it, an EFB copy or the frame's end,
+  once per depth clear, and only for perspective viewports over half the EFB;
+  replays recompute it. Its radius is a share of the viewport's height, so it
+  suits any game's units; it fades toward the far plane and into the game's
+  fog, and thin occluders in front count less.
 - 8 bits a channel with no dithering; mip selection follows the render
   resolution.
 - A display aspect (4:3, 16:9) kept as the window is resized, letterboxed.
