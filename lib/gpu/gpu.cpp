@@ -380,9 +380,12 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
       .surfaceHeight = size.native_fb_height,
       .presentMode = best_present_mode(g_config.vsync),
       .depthFormat = rhi::Format::Depth32Float,
-      .msaaSamples = g_config.msaa,
+      .msaaSamples = std::min(g_config.msaa, g_device->features().max_samples),
       .textureAnisotropy = g_config.maxTextureAnisotropy,
   };
+  if (g_graphicsConfig.msaaSamples != g_config.msaa) {
+    Log.warn("MSAA {}x asked, the GPU does {}x", g_config.msaa, g_graphicsConfig.msaaSamples);
+  }
   if (!create_surface()) {
     return false;
   }

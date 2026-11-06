@@ -61,7 +61,7 @@ Which Aurora to use:
 
 **Image quality**
 
-- MSAA 4x, with depth copies resolved from sample 0.
+- MSAA up to 8x (what the GPU does), with depth copies resolved from sample 0.
 - Alpha to coverage under MSAA for unblended alpha-test cutouts, where the
   EFB keeps no alpha.
 - A render scale above the window's size, reduced with an area (box) filter
@@ -206,7 +206,7 @@ The producer is the one thread that submits: the game's CPU thread.
 | `interpolate` | Frame interpolation (see below) |
 | `present_rate` | Presents per second without vsync; 0 means the display's refresh rate |
 | `aspect` | The aspect the game's frames are shown at (4:3, 16:9); 0 stretches them to the window |
-| `msaa` | 1 or 4 samples |
+| `msaa` | 1, 2, 4 or 8 samples, capped at the GPU's most |
 | `render_scale` | The frame buffer's size over the window's: 1 renders at the window's size, above it renders larger and reduces with an area filter |
 | `dump_textures` | Writes each texture no pack replaces to `<cache_path>/texture_dumps` |
 | `stats` | One line of counters per second on stderr (see [Statistics](#statistics)) |
@@ -325,7 +325,6 @@ With `stats` on, a line a second on stderr:
 ## Limitations
 
 - **One renderer per process.** The FIFO host is a single instance.
-- **MSAA is 1x or 4x** for now; 8x is planned.
 - **EFB copies stay on the GPU.** Textures the game samples from a copy's
   address use the copy, but its pixels never reach guest memory, so a game
   that reads them on the CPU sees what was there before.
