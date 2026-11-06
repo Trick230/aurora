@@ -294,7 +294,6 @@ void bind_gx_groups(rhi::CommandList& list);
 void bind_index_buffer(rhi::CommandList& list);
 rhi::Sampler* sampler_ref(const rhi::SamplerDesc& descriptor);
 
-uint32_t align_uniform(uint32_t value);
 
 Vec2<uint32_t> get_render_target_size() noexcept;
 void set_viewport(const Viewport& viewport) noexcept;

@@ -44,3 +44,11 @@ add_subdirectory(extern)
 include(cmake/AuroraRhi.cmake)
 include(cmake/aurora_core.cmake)
 include(cmake/aurora_gx.cmake)
+
+# Compiles a pipeline seed's shaders for every backend at build time:
+# aurora_shader_pack <initial_pipeline_cache.db> <out dir>
+include(cmake/AuroraCopyRuntimeDLLs.cmake)
+add_executable(aurora_shader_pack EXCLUDE_FROM_ALL tools/shader_pack.cpp)
+target_link_libraries(aurora_shader_pack PRIVATE aurora::gx aurora::core absl::flat_hash_set sqlite3)
+set_target_properties(aurora_shader_pack PROPERTIES FOLDER "aurora")
+aurora_copy_runtime_dlls(aurora_shader_pack)

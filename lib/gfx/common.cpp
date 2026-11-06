@@ -1151,7 +1151,6 @@ rhi::Sampler* sampler_ref(const rhi::SamplerDesc& descriptor) {
   return it->second.get();
 }
 
-uint32_t align_uniform(uint32_t value) { return AURORA_ALIGN(value, g_device->features().uniform_offset_alignment); }
 
 } // namespace aurora::gfx
 
