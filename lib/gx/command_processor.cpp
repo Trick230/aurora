@@ -390,6 +390,7 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian, u32 
 static void handle_bp(u32 value, bool bigEndian);
 static void handle_cp(u8 addr, u32 value, bool bigEndian);
 static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
+static void handle_host_gx(recomp::HostGxCall call, u32 index, const u8* words, bool bigEndian);
 static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian);
 static void invalidate_array_uploads();
 
@@ -501,6 +502,18 @@ void process(const u8* data, u32 size, bool bigEndian) {
 
     case CP_CMD_INVAL_VTX: {
       invalidate_array_uploads();
+      break;
+    }
+
+    case recomp::HostGxOpcode: {
+      CHECK(pos + recomp::HostGxHeaderSize - 1 <= size, "host GX call read overrun");
+      const auto call = static_cast<recomp::HostGxCall>(data[pos]);
+      const u32 index = data[pos + 1];
+      const u32 bytes = recomp::host_gx_size(data[pos]);
+      CHECK(bytes != 0, "unknown host GX call {}", data[pos]);
+      CHECK(pos + bytes - 1 <= size, "host GX call read overrun");
+      handle_host_gx(call, index, data + pos + 2, bigEndian);
+      pos += bytes - 1;
       break;
     }
 
@@ -1759,6 +1772,42 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
   pos += dataBytes;
 }
 
+// A GX call the host made (recomp::HostGxOpcode): its XF load, as the SDK
+// would have encoded it.
+static void handle_host_gx(recomp::HostGxCall call, u32 index, const u8* words, bool bigEndian) {
+  u32 addr = 0;
+  u32 count = 0;
+  switch (call) {
+  case recomp::HostGxCall::LoadPosMtx:
+    addr = index * 4;
+    count = 12;
+    break;
+  case recomp::HostGxCall::LoadNrmMtx:
+    addr = 0x400 + index * 3;
+    count = 9;
+    break;
+  case recomp::HostGxCall::LoadTexMtx34:
+  case recomp::HostGxCall::LoadTexMtx24:
+    // GX_PTTEXMTX0 on are the post-transform matrices, past the normal ones.
+    addr = index >= GX_PTTEXMTX0 ? 0x500 + (index - GX_PTTEXMTX0) * 4 : index * 4;
+    count = call == recomp::HostGxCall::LoadTexMtx34 ? 12 : 8;
+    break;
+  case recomp::HostGxCall::LoadLight: {
+    // Three reserved words the SDK writes as zero, then the object's.
+    std::array<u8, 16 * 4> light{};
+    std::memcpy(light.data() + 3 * 4, words, 13 * 4);
+    addr = 0x600 + index * 0x10;
+    shadow_xf(addr, light.data(), 16, bigEndian);
+    copy_xf_data(addr, light.data(), 16, bigEndian, 0);
+    return;
+  }
+  case recomp::HostGxCall::Count:
+    return;
+  }
+  shadow_xf(addr, words, count, bigEndian);
+  copy_xf_data(addr, words, count, bigEndian, 0);
+}
+
 static void handle_draw_overrun [[noreturn]] (u32 totalVtxBytes, const u8* data, const u32& pos, u32 size) {
   // Hex dump around the draw command for debugging
   u32 cmdPos = pos - 2 - 1; // opcode byte position (before vtxCount and pos++)
@@ -2242,6 +2291,15 @@ u32 packet_size(const u8* data, u32 size) {
     break;
   case recomp::HostViewOpcode:
     need = recomp::HostViewSize;
+    break;
+  case recomp::HostGxOpcode:
+    if (size < 2) {
+      return 0;
+    }
+    need = recomp::host_gx_size(data[1]);
+    if (need == 0) {
+      return 1; // unknown: skipped as garbage
+    }
     break;
   default: {
     if (cmd < 0x80) {

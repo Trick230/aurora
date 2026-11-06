@@ -52,6 +52,27 @@ enum class StreamEvent : std::uint32_t {
 constexpr std::uint8_t HostViewOpcode = 0x70;
 constexpr std::uint32_t HostViewSize = 1 + 12 * 4;
 
+// And GX calls the host makes in place of the game's code (GX at the API): the
+// opcode, the call, its index, then its data as the game keeps it (big-endian
+// words). The host writes them where the call would have written its FIFO
+// packets, so they keep their order with the vertices and everything else;
+// the call's XF address and size are worked out here.
+constexpr std::uint8_t HostGxOpcode = 0x78;
+enum class HostGxCall : std::uint8_t {
+  LoadPosMtx,   // GXLoadPosMtxImm: index the matrix id, a 3x4 matrix
+  LoadNrmMtx,   // GXLoadNrmMtxImm: index the matrix id, a 3x3 matrix (rows of 3)
+  LoadTexMtx34, // GXLoadTexMtxImm with GX_MTX3x4: index the GXTexMtx id, a 3x4 matrix
+  LoadTexMtx24, // GXLoadTexMtxImm with GX_MTX2x4: index the GXTexMtx id, a 2x4 matrix
+  LoadLight,    // GXLoadLightObjImm: index the light (0-7), the GXLightObj from its color on (13 words)
+  Count,
+};
+constexpr std::uint32_t HostGxHeaderSize = 3;
+// The packet's size from its call byte, 0 for an unknown call.
+constexpr std::uint32_t host_gx_size(std::uint8_t call) {
+  constexpr std::uint8_t words[] = {12, 9, 12, 8, 13};
+  return call < static_cast<std::uint8_t>(HostGxCall::Count) ? HostGxHeaderSize + words[call] * 4u : 0;
+}
+
 // Processes the complete packets at the front of a big-endian retail FIFO
 // stream, as the hardware command processor would, and returns how many bytes
 // it consumed; whatever is left is the start of a packet still being written.

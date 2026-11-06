@@ -264,6 +264,32 @@ hook serves any g3d game. A game with its own engine needs a hook of its own.
 Interpolation needs the game's frames to arrive regularly and the throttle
 on: run uncapped, there is nothing to present between.
 
+## GX calls from the host
+
+A recompiled game can replace some GX calls with host code that hands Aurora
+the call and its data instead of encoding XF packets. The host writes one
+packet into the gather pipe where the call's own packets would have gone, so
+it keeps its order with everything around it:
+
+```
+0x78                         opcode (no retail packet has these bits)
+1 byte                       the call (gx/recomp.hpp HostGxCall)
+1 byte                       its index: matrix id or light (0-7)
+big-endian words             the call's data as the game keeps it
+```
+
+| Call | Data |
+| --- | --- |
+| `GXLoadPosMtxImm` | 3x4 matrix (12 words) |
+| `GXLoadNrmMtxImm` | upper-left 3x3 of the matrix (9 words) |
+| `GXLoadTexMtxImm`, 3x4 | 12 words; ids from `GX_PTTEXMTX0` are post-transform matrices |
+| `GXLoadTexMtxImm`, 2x4 | 8 words, normal texture matrices only |
+| `GXLoadLightObjImm` | the `GXLightObj` from its color on (13 words) |
+
+Aurora works out the XF address and loads the data as the SDK's packet would
+have, so the rest of the pipeline, interpolation included, sees no
+difference.
+
 ## Pipeline cache
 
 Each GX setup becomes a GPU pipeline, compiled the first time a draw needs
