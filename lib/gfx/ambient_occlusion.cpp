@@ -32,14 +32,16 @@ namespace aurora::gfx::ao {
 namespace {
 using gpu::g_device;
 
-// Above this EFB height the occlusion is computed at half resolution.
-constexpr uint32_t FullResolutionMaxHeight = 720;
+// Above this EFB height the occlusion is computed at half resolution. Below
+// it, a half-resolution texel is large on screen: along a slanted crease the
+// occlusion jumps a texel at a time and crawls as dashes when the view moves.
+constexpr uint32_t FullResolutionMaxHeight = 1440;
 constexpr float Radius = 0.035f;    // of the viewport's height
 constexpr float Strength = 1.0f;    // 0 leaves the image, 1 applies all of it
 constexpr float FadeStart = 0.25f;  // of the distance to the far plane
 constexpr float FadeEnd = 0.6f;
 constexpr float ThinOccluders = 0.7f; // how much depth in front of a pixel stretches a sample's distance
-constexpr float Power = 1.5f;          // deepens the occlusion where there is some, as XeGTAO's final power
+constexpr float Power = 1.0f;          // XeGTAO's final power; above 1 it deepens creases into outlines
 constexpr float MinHeight = 2.0f;      // in occlusion texels: what stands less above the surface casts nothing,
                                        // and the config's ambientOcclusionMinHeight in view space
 

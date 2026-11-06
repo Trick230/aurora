@@ -71,7 +71,9 @@ Which Aurora to use:
 - 16x anisotropic filtering on every mipmapped texture.
 - Ambient occlusion (`ambientOcclusion`): GTAO from the EFB's depth, 4 slices
   of 3 steps a side under a 4x4 noise pattern that a depth-weighted 4x4
-  average removes, at full resolution up to a 720-line EFB and half above,
+  average removes, at full resolution up to a 1440-line EFB and half above
+  (below that a half-resolution texel is large enough on screen that a
+  slanted crease's occlusion steps along it in dashes that crawl),
   then upsampled by depth. The depth is linearized once, so the multisampled
   buffer is read twice a pixel in all. It goes over the world once it is
   drawn, before the first 2D draw after it, an EFB copy or the frame's end,
@@ -81,7 +83,8 @@ Which Aurora to use:
   fog, thin occluders in front count less, and a layer a texel or two above
   a surface, or less than `ambientOcclusionMinHeight` in the game's units
   (hair over a head), casts nothing, where it would draw a dark line along
-  its edge.
+  its edge. No power over the visibility: above 1 it deepens creases into
+  outlines.
 - 8 bits a channel with no dithering; mip selection follows the render
   resolution.
 - A display aspect (4:3, 16:9) kept as the window is resized, letterboxed.
