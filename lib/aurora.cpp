@@ -37,7 +37,8 @@ uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
 }
 
 // AURORA_FRAME_DUMP=<dir>: each frame's hash goes to hashes.txt there, and every
-// 30th frame's RGBA pixels to <frame>.raw, to compare renderers by numbers.
+// 30th frame's RGBA pixels to <frame>.raw, to compare renderers by numbers
+// (AURORA_FRAME_DUMP_EVERY=<n> keeps every nth instead, 1 for an animation).
 const char* frame_dump_dir() noexcept {
   static const char* dir = std::getenv("AURORA_FRAME_DUMP");
   return dir;
@@ -79,7 +80,12 @@ void frame_dump_write(const FrameDump& dump) {
                  static_cast<unsigned long long>(XXH3_64bits(pixels.data(), pixels.size())));
     std::fclose(hashes);
   }
-  if (frame % 30 == 0) {
+  static const uint64_t every = [] {
+    const char* value = std::getenv("AURORA_FRAME_DUMP_EVERY");
+    const long n = value ? std::strtol(value, nullptr, 10) : 30;
+    return static_cast<uint64_t>(n > 0 ? n : 30);
+  }();
+  if (frame % every == 0) {
     const std::string path = fmt::format("{}/{:06}.raw", dir, frame);
     if (FILE* raw = std::fopen(path.c_str(), "wb")) {
       std::fwrite(pixels.data(), 1, pixels.size(), raw);
