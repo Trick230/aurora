@@ -28,6 +28,9 @@ typedef struct AuroraFifoHost {
   void (*quit)(void* user);
   // Optional: the render thread started (to name it for a profiler, say).
   void (*thread_started)(void* user);
+  // Optional: the host's ImGui windows for the frame the game just finished,
+  // drawn over it (and over its interpolated presents) on the render thread.
+  void (*draw_ui)(void* user);
 } AuroraFifoHost;
 
 typedef struct AuroraFifoConfig {

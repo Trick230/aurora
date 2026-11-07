@@ -367,6 +367,8 @@ void RenderThread(std::atomic<int>* started)
         }
         {
           const auto end_start = std::chrono::steady_clock::now();
+          if (s_host.draw_ui != nullptr)
+            s_host.draw_ui(s_host.user);
           aurora_end_frame();
           s_stats.end_frame += std::chrono::steady_clock::now() - end_start;
         }
