@@ -109,6 +109,15 @@ struct DrawData::Impl {
 static std::shared_ptr<Texture> g_fonts;
 static bool g_fontsPending = false;
 
+// The host's textures, and the pixels of those still to go up with a frame.
+static std::vector<std::shared_ptr<Texture>> g_hostTextures;
+struct PendingUpload {
+  std::shared_ptr<Texture> texture;
+  std::vector<uint8_t> pixels;
+  uint32_t width, height;
+};
+static std::vector<PendingUpload> g_pendingUploads;
+
 static void create_fonts() {
   unsigned char* pixels = nullptr;
   int width = 0, height = 0;
@@ -155,6 +164,8 @@ void shutdown() noexcept {
   ImGui_ImplSDL3_Shutdown();
   ImGui::DestroyContext();
   g_fonts.reset();
+  g_pendingUploads.clear();
+  g_hostTextures.clear();
   g_sampler.reset();
   g_pipeline.reset();
   g_pipelineLayout.reset();
@@ -198,6 +209,11 @@ DrawData freeze() noexcept {
   if (g_fontsPending) {
     upload_fonts();
   }
+  for (const PendingUpload& upload : g_pendingUploads) {
+    gfx::queue_texture_upload_data(upload.pixels.data(), upload.width * 4, upload.height, upload.texture->texture, 0,
+                                   {upload.width, upload.height, 1});
+  }
+  g_pendingUploads.clear();
   auto frozen = std::make_shared<DrawData::Impl>();
   frozen->fonts = g_fonts;
   frozen->drawData = *data;
@@ -298,4 +314,14 @@ std::vector<std::string> shader_sources() { return {Shader}; }
 extern "C" {
 void aurora_imgui_set_active(bool active) { aurora::imgui::set_active(active); }
 bool aurora_imgui_active() { return aurora::imgui::active(); }
+ImTextureID aurora_imgui_add_texture(const uint8_t* rgba, uint32_t width, uint32_t height) {
+  using namespace aurora;
+  using namespace aurora::imgui;
+  auto texture = std::make_shared<Texture>();
+  texture->texture = g_device->create_texture({width, height, 1, 1, rhi::Format::RGBA8Unorm, rhi::TextureSampled});
+  texture->view = texture->texture->create_view({});
+  g_pendingUploads.push_back({texture, {rgba, rgba + static_cast<size_t>(width) * height * 4}, width, height});
+  g_hostTextures.push_back(texture);
+  return reinterpret_cast<ImTextureID>(texture.get());
+}
 }
