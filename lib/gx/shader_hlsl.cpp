@@ -1251,7 +1251,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
     fragmentFnPre += fmt::format(
         "\n    // Indirect stage {0}"
         "\n    float3 t_IndTexCoord{0} = 255.0 * textureSampleBias(tex{1}, tex{1}_samp, {2}, "
-        "ubuf.tex{1}_size_bias.z).abg;",
+        "ubuf.tex{1}_size_bias).abg;",
         i, texMapId, scaleExpr);
   }
   if (info.usedIndStages.any()) {
@@ -1434,7 +1434,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
       uvIn = fmt::format("tex{0}_uv", underlying(stage.texCoordId));
     }
     fragmentFnPre +=
-        fmt::format("\n    float4 sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,
+        fmt::format("\n    float4 sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias);", i,
                     underlying(stage.texMapId), uvIn);
   }
   if (info.usesPTTexMtx.any())
@@ -1614,7 +1614,21 @@ std::string shader_helpers() noexcept {
 #define f32 float
 #define u32 uint
 #define mix lerp
-#define textureSampleBias(tex, samp, uv, bias) tex.SampleBias(samp, uv, bias)
+// A texture's sample: size_bias.z its LOD bias, size_bias.w the axes (bit 0 s,
+// bit 1 t) that repeat in the shader on a clamped sampler (see
+// edge_clamped_axes): coordinates within the texture stay clamped, so a 2D
+// sprite drawn larger than 1:1 never blends in its far side at its edges.
+#define textureSampleBias(tex, samp, uv, size_bias) sample_texture(tex, samp, uv, size_bias)
+float4 sample_texture(Texture2D tex, SamplerState samp, float2 uv, float4 size_bias) {
+  if (size_bias.w == 0.0) {
+    return tex.SampleBias(samp, uv, size_bias.z);
+  }
+  const float2 repeats = float2(fmod(size_bias.w, 2.0), floor(size_bias.w / 2.0));
+  const float2 outside = float2(uv.x < 0.0 || uv.x > 1.0, uv.y < 0.0 || uv.y > 1.0);
+  const float2 wrapped = lerp(uv, uv - floor(uv), repeats * outside);
+  const float scale = exp2(size_bias.z);
+  return tex.SampleGrad(samp, wrapped, ddx(uv) * scale, ddy(uv) * scale);
+}
 // WGSL's order of arguments, on HLSL 2021's select.
 #define select(if_false, if_true, condition) select((condition), (if_true), (if_false))
 #define extractBits(value, offset, bits) (((value) >> (offset)) & ((1u << (bits)) - 1u))

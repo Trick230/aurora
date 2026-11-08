@@ -555,6 +555,10 @@ std::shared_ptr<rhi::RenderPipeline> build_pipeline(const PipelineConfig& config
                                                      const rhi::ShaderCode& vertex,
                                                      const rhi::ShaderCode& fragment) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
+// The axes (bit 0 s, bit 1 t) of a texture that repeats in a 2D (orthographic)
+// draw: its sampler clamps and the shader repeats coordinates outside it, so
+// sprites drawn above 1:1 keep their edges (see sample_texture).
+u32 edge_clamped_axes(const gfx::TextureBind& tex) noexcept;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 u8 comp_cnt_count(GXAttr attr, GXCompCnt cnt) noexcept;

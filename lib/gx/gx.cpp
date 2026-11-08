@@ -715,6 +715,13 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
                                         alpha_cutout_threshold(g_gxState.alphaCompare) >= 0.f;
 }
 
+u32 edge_clamped_axes(const gfx::TextureBind& tex) noexcept {
+  if (g_gxState.projType != GX_ORTHOGRAPHIC) {
+    return 0;
+  }
+  return (tex.texObj.wrap_s() == GX_REPEAT ? 1u : 0u) | (tex.texObj.wrap_t() == GX_REPEAT ? 2u : 0u);
+}
+
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
   if (!info.sampledTextures.any() && !info.sampledIndTextures.any()) {
     // Don't bother re-binding anything
@@ -865,8 +872,9 @@ rhi::SamplerDesc aurora::gfx::TextureBind::get_descriptor() const noexcept {
     desc.min = rhi::Filter::Linear;
     desc.mip = rhi::Filter::Linear;
   }
-  desc.u = to_address_mode(texObj.wrap_s());
-  desc.v = to_address_mode(texObj.wrap_t());
+  const u32 clamped = aurora::gx::edge_clamped_axes(*this);
+  desc.u = (clamped & 1u) != 0 ? rhi::AddressMode::ClampToEdge : to_address_mode(texObj.wrap_s());
+  desc.v = (clamped & 2u) != 0 ? rhi::AddressMode::ClampToEdge : to_address_mode(texObj.wrap_t());
   desc.anisotropy = maxAnisotropy;
   return desc;
 } // namespace aurora::gx

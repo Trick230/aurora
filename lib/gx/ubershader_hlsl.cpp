@@ -475,16 +475,16 @@ static const uint FLAG_ADD_PREVIOUS = 1u << 13u;
 static const uint FLAG_WRITES_COORD = 1u << 14u;
 static const uint FLAG_ALPHA_COMPARES_COLOR = 1u << 15u;
 
-float4 sample_map(uint map, float2 uv, float bias) {
+float4 sample_map(uint map, float2 uv, float4 size_bias) {
   switch (map) {
-    case 0u: { return textureSampleBias(tex0, tex0_samp, uv, bias); }
-    case 1u: { return textureSampleBias(tex1, tex1_samp, uv, bias); }
-    case 2u: { return textureSampleBias(tex2, tex2_samp, uv, bias); }
-    case 3u: { return textureSampleBias(tex3, tex3_samp, uv, bias); }
-    case 4u: { return textureSampleBias(tex4, tex4_samp, uv, bias); }
-    case 5u: { return textureSampleBias(tex5, tex5_samp, uv, bias); }
-    case 6u: { return textureSampleBias(tex6, tex6_samp, uv, bias); }
-    default: { return textureSampleBias(tex7, tex7_samp, uv, bias); }
+    case 0u: { return textureSampleBias(tex0, tex0_samp, uv, size_bias); }
+    case 1u: { return textureSampleBias(tex1, tex1_samp, uv, size_bias); }
+    case 2u: { return textureSampleBias(tex2, tex2_samp, uv, size_bias); }
+    case 3u: { return textureSampleBias(tex3, tex3_samp, uv, size_bias); }
+    case 4u: { return textureSampleBias(tex4, tex4_samp, uv, size_bias); }
+    case 5u: { return textureSampleBias(tex5, tex5_samp, uv, size_bias); }
+    case 6u: { return textureSampleBias(tex6, tex6_samp, uv, size_bias); }
+    default: { return textureSampleBias(tex7, tex7_samp, uv, size_bias); }
   }
 }
 
@@ -714,7 +714,7 @@ float4 tev_shade(VertexOutput input) {
         uint map = byte_of(w0, 1u);
         float2 scale = vec2f(1.0 / float(1u << byte_of(w1, 0u)), 1.0 / float(1u << byte_of(w1, 1u)));
         float2 uv = tex_uv[coord] * ubuf.texcoord_scale[coord].xy * scale / ubuf.tex_size_bias[map].xy;
-        ind_coord[i] = 255.0 * sample_map(map, uv, ubuf.tex_size_bias[map].z).abg;
+        ind_coord[i] = 255.0 * sample_map(map, uv, ubuf.tex_size_bias[map]).abg;
     }
 
     // Each stage's texture, with the texcoords the indirect stages carry on.
@@ -792,7 +792,7 @@ float4 tev_shade(VertexOutput input) {
         if (!uv_set) {
             uv = tex_uv[coord];
         }
-        samples[i] = sample_map(map, uv, ubuf.tex_size_bias[map].z);
+        samples[i] = sample_map(map, uv, ubuf.tex_size_bias[map]);
     }
 
     for (uint i = 0u; i < stages; i++) {

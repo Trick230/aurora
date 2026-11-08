@@ -40,7 +40,7 @@ Vec4<float> texture_size_bias(const gfx::TextureBind& tex) {
     const float replacementScale = static_cast<float>(tex.ref->size.width) / std::max(width, 1.f);
     vpBias = std::log2(viewportScale / std::max(replacementScale, 0.001f));
   }
-  return {width, height, tex.texObj.lod_bias() + vpBias, 0.0f};
+  return {width, height, tex.texObj.lod_bias() + vpBias, static_cast<float>(edge_clamped_axes(tex))};
 }
 
 void color_arg_reg_info(GXTevColorArg arg, const TevStage& stage, ShaderInfo& info) {
