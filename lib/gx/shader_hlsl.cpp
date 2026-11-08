@@ -1123,10 +1123,12 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
       continue;
     }
     const auto& tcg = config.tcgs[i];
+    // Centroid: under MSAA a pixel on an edge shared by two quads must not read
+    // texcoords extrapolated past the quad (a wrap there samples the far side).
     if (tcg.type == GX_TG_MTX3x4) {
-      vtxOutAttrs += fmt::format("\n    float3 tex{1}_uvw : TEXCOORD{0};", vtxOutIdx++, i);
+      vtxOutAttrs += fmt::format("\n    centroid float3 tex{1}_uvw : TEXCOORD{0};", vtxOutIdx++, i);
     } else {
-      vtxOutAttrs += fmt::format("\n    float2 tex{1}_uv : TEXCOORD{0};", vtxOutIdx++, i);
+      vtxOutAttrs += fmt::format("\n    centroid float2 tex{1}_uv : TEXCOORD{0};", vtxOutIdx++, i);
     }
     if (is_emboss_texgen(tcg.type)) {
       // Emboss bump: offset the source texcoord by the light projected onto tangent/binormal

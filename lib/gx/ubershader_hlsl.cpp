@@ -296,14 +296,14 @@ struct VertexOutput {
     float4 pos : SV_Position;
     float4 cc0 : TEXCOORD0;
     float4 cc1 : TEXCOORD1;
-    float3 tex0 : TEXCOORD2;
-    float3 tex1 : TEXCOORD3;
-    float3 tex2 : TEXCOORD4;
-    float3 tex3 : TEXCOORD5;
-    float3 tex4 : TEXCOORD6;
-    float3 tex5 : TEXCOORD7;
-    float3 tex6 : TEXCOORD8;
-    float3 tex7 : TEXCOORD9;
+    centroid float3 tex0 : TEXCOORD2;
+    centroid float3 tex1 : TEXCOORD3;
+    centroid float3 tex2 : TEXCOORD4;
+    centroid float3 tex3 : TEXCOORD5;
+    centroid float3 tex4 : TEXCOORD6;
+    centroid float3 tex5 : TEXCOORD7;
+    centroid float3 tex6 : TEXCOORD8;
+    centroid float3 tex7 : TEXCOORD9;
 };
 
 VertexOutput vs_main(uint vidx : SV_VertexID, uint iidx : SV_InstanceID) {
