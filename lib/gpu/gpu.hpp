@@ -61,6 +61,8 @@ bool initialize(AuroraBackend backend, bool allowCpu);
 void shutdown();
 void release_surface() noexcept;
 bool refresh_surface(bool recreate = true);
+// The present mode for vsync on or off; takes effect when the surface is next created.
+void set_vsync(bool vsync) noexcept;
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force = false);
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);
 const TextureWithSampler& present_source() noexcept;

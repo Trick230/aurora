@@ -711,7 +711,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   };
   // The coverage alpha would replace the fragment's alpha in an EFB that keeps it.
   const bool efbAlpha = g_gxState.alphaUpdate && g_gxState.pixelFmt == GX_PF_RGBA6_Z24;
-  config.shaderConfig.alphaToCoverage = config.msaaSamples > 1 && g_gxState.blendMode == GX_BM_NONE && !efbAlpha &&
+  config.shaderConfig.alphaToCoverage = g_config.alphaToCoverage && config.msaaSamples > 1 && g_gxState.blendMode == GX_BM_NONE && !efbAlpha &&
                                         alpha_cutout_threshold(g_gxState.alphaCompare) >= 0.f;
 }
 

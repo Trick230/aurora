@@ -1,6 +1,8 @@
 #include <aurora/aurora.h>
 
+#include "gfx/ambient_occlusion.hpp"
 #include "gfx/common.hpp"
+#include "gfx/frame_interp.hpp"
 #include "gfx/render_worker.hpp"
 #include "imgui.hpp"
 #include "gpu/gpu.hpp"
@@ -9,8 +11,10 @@
 #include "window.hpp"
 
 #include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_video.h>
 #include <magic_enum.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -282,6 +286,67 @@ void end_frame() noexcept {
   });
   window::set_frame_open(false);
 }
+
+// What changed takes effect at once, the GPU idle: the frame buffers (scale,
+// samples) and the surface (vsync) are made again, the passes that depend on
+// them restart, and the window changes as SDL changes it.
+void set_video(const AuroraVideoSettings& s) noexcept {
+  const uint32_t samples = std::min(std::max(s.msaa, 1u), g_device->features().max_samples);
+  const bool vsync = s.vsync != g_config.vsync;
+  const bool msaa = samples != gpu::g_graphicsConfig.msaaSamples;
+  const bool scale = s.renderScale > 0.f && s.renderScale != g_config.renderScale;
+  const bool ao = s.ambientOcclusion != g_config.ambientOcclusion || (msaa && g_config.ambientOcclusion);
+  const bool interp = s.frameInterpolation != g_config.frameInterpolation ||
+                      (s.frameInterpolation && (vsync || s.presentRate != g_config.presentRate));
+  if (interp && gfx::interp::enabled()) {
+    gfx::interp::shutdown();
+  }
+  if (vsync || msaa || scale || ao) {
+    gfx::render_worker::synchronize();
+    g_device->wait_idle();
+  }
+  g_config.vsync = s.vsync;
+  g_config.msaa = s.msaa;
+  g_config.alphaToCoverage = s.alphaToCoverage;
+  if (s.renderScale > 0.f) {
+    g_config.renderScale = s.renderScale;
+  }
+  gpu::g_graphicsConfig.msaaSamples = samples;
+  if (ao) {
+    gfx::ao::shutdown();
+    g_config.ambientOcclusion = s.ambientOcclusion;
+    gfx::ao::initialize();
+  }
+  if (vsync || msaa || scale) {
+    gfx::interp::discard();  // its replays draw into the targets made again
+    gpu::set_vsync(s.vsync);
+    gfx::clear_caches();
+    gpu::refresh_surface(vsync);
+  }
+  g_config.frameInterpolation = s.frameInterpolation;
+  g_config.presentRate = s.presentRate;
+  if (interp && s.frameInterpolation) {
+    gfx::interp::initialize(s.vsync, s.presentRate);
+  }
+
+  SDL_Window* window = window::get_sdl_window();
+  if (window == nullptr) {
+    return;
+  }
+  const bool fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+  if (fullscreen != s.fullscreen) {
+    SDL_SetWindowFullscreenMode(window, nullptr);  // borderless, at the desktop's mode
+    SDL_SetWindowFullscreen(window, s.fullscreen);
+  }
+  if (!s.fullscreen && s.windowWidth != 0 && s.windowHeight != 0 &&
+      (s.windowWidth != g_config.windowWidth || s.windowHeight != g_config.windowHeight)) {
+    SDL_SetWindowSize(window, static_cast<int>(s.windowWidth), static_cast<int>(s.windowHeight));
+    SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+  }
+  g_config.windowWidth = s.windowWidth;
+  g_config.windowHeight = s.windowHeight;
+  g_config.startFullscreen = s.fullscreen;
+}
 } // namespace
 } // namespace aurora
 
@@ -293,3 +358,4 @@ void aurora_shutdown() { aurora::shutdown(); }
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 void aurora_end_frame() { aurora::end_frame(); }
+void aurora_set_video(const AuroraVideoSettings* settings) { aurora::set_video(*settings); }

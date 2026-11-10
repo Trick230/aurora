@@ -109,7 +109,7 @@ typedef struct {
    * refresh rate (vsync) or presentRate (no vsync; 0 = the refresh rate).
    */
   bool frameInterpolation;
-  uint32_t presentRate;
+  uint32_t presentRate;  // AURORA_PRESENT_UNLIMITED: as fast as the GPU goes
   /**
    * The aspect the game's frames are shown at, whatever the window's: they
    * are rendered at it and letterboxed, and the window keeps it as it is
@@ -126,7 +126,32 @@ typedef struct {
    * a model is built from, such as hair over a head. 0 for none.
    */
   float ambientOcclusionMinHeight;
+  /**
+   * Alpha to coverage on alpha-tested draws while multisampling: their cut
+   * edges (leaves, fences) are antialiased too.
+   */
+  bool alphaToCoverage;
 } AuroraConfig;
+
+#define AURORA_PRESENT_UNLIMITED 0xFFFFFFFFu
+
+/**
+ * The settings that can change while the game runs, as AuroraConfig has them.
+ */
+typedef struct {
+  bool vsync;
+  bool frameInterpolation;
+  uint32_t presentRate;
+  uint32_t msaa;
+  float renderScale;
+  bool ambientOcclusion;
+  bool alphaToCoverage;
+  /** Borderless over the whole display. */
+  bool fullscreen;
+  /** The window's size out of fullscreen; 0 keeps it. */
+  uint32_t windowWidth;
+  uint32_t windowHeight;
+} AuroraVideoSettings;
 
 typedef struct {
   AuroraBackend backend;
@@ -141,6 +166,8 @@ void aurora_shutdown();
 const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
+/** Between frames (after aurora_end_frame), on the thread that renders. */
+void aurora_set_video(const AuroraVideoSettings* settings);
 
 
 #ifdef __cplusplus

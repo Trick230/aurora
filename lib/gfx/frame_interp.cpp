@@ -1462,11 +1462,14 @@ void pacer_main() {
 void initialize(bool vsync, uint32_t presentRate) {
   g_vsync = vsync;
   float rate = static_cast<float>(presentRate);
-  if (rate <= 0.f) {
+  if (presentRate == AURORA_PRESENT_UNLIMITED) {
+    rate = 0.f;
+  } else if (rate <= 0.f) {
     const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window::get_sdl_window()));
     rate = mode != nullptr && mode->refresh_rate > 0.f ? mode->refresh_rate : 60.f;
   }
-  g_interval = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<float>(1.f / rate));
+  g_interval = rate > 0.f ? std::chrono::duration_cast<Clock::duration>(std::chrono::duration<float>(1.f / rate))
+                          : Clock::duration::zero();
 
   g_buffer = g_device->create_buffer({UniformBufferSize});
   for (auto& replay : g_replays) {

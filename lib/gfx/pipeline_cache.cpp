@@ -964,7 +964,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
     if (config.msaaSamples != 1 && config.msaaSamples != samples) {
       config.msaaSamples = samples;
       if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
-        config.shaderConfig.alphaToCoverage = config.shaderConfig.alphaToCoverage && samples > 1;
+        config.shaderConfig.alphaToCoverage = config.shaderConfig.alphaToCoverage && samples > 1 && g_config.alphaToCoverage;
       }
     }
 

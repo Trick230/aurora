@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <thread>
 #include <string>
 #include <vector>
@@ -165,6 +167,22 @@ struct Stats
 };
 Stats s_stats;
 
+// Settings asked for while running, and the display's room for a window.
+std::mutex s_video_mutex;
+std::optional<AuroraVideoSettings> s_video;
+std::atomic<uint32_t> s_display_width{0}, s_display_height{0};
+
+void ApplyVideo()
+{
+  std::optional<AuroraVideoSettings> video;
+  {
+    std::lock_guard lock(s_video_mutex);
+    video.swap(s_video);
+  }
+  if (video)
+    aurora_set_video(&*video);
+}
+
 void Log(AuroraLogLevel level, const char* module, const char* message, unsigned int len)
 {
   if (level < LOG_WARNING)
@@ -282,6 +300,8 @@ void RenderThread(std::atomic<int>* started)
   config.ambientOcclusion = s_config.ambient_occlusion;
   config.ambientOcclusionMinHeight = s_config.ambient_occlusion_min_height;
   config.renderScale = s_config.render_scale;
+  config.startFullscreen = s_config.fullscreen;
+  config.alphaToCoverage = s_config.alpha_to_coverage;
   // 16x on every mipmapped texture, not only where the game asks for it.
   config.maxTextureAnisotropy = 16;
   config.forceTextureAnisotropy = true;
@@ -298,6 +318,14 @@ void RenderThread(std::atomic<int>* started)
     started->store(-1, std::memory_order_release);
     started->notify_one();
     return;
+  }
+  {
+    SDL_Rect area{};
+    if (SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(info.window), &area))
+    {
+      s_display_width.store(static_cast<uint32_t>(area.w));
+      s_display_height.store(static_cast<uint32_t>(area.h));
+    }
   }
   aurora::gx::recomp::set_guest_address_resolver(Resolve, nullptr);
   aurora::texture::load_replacement_directory(s_texture_path);
@@ -370,6 +398,7 @@ void RenderThread(std::atomic<int>* started)
           if (s_host.draw_ui != nullptr)
             s_host.draw_ui(s_host.user);
           aurora_end_frame();
+          ApplyVideo();
           s_stats.end_frame += std::chrono::steady_clock::now() - end_start;
         }
         if (!PumpEvents())
@@ -520,4 +549,16 @@ void aurora_fifo_stop(void)
   SDL_DestroySemaphore(s_ring.drained);
   s_ring.wake = s_ring.drained = nullptr;
 }
+}
+
+void aurora_fifo_set_video(const AuroraVideoSettings* settings)
+{
+  std::lock_guard lock(s_video_mutex);
+  s_video = *settings;
+}
+
+void aurora_fifo_display_area(uint32_t* width, uint32_t* height)
+{
+  *width = s_display_width.load();
+  *height = s_display_height.load();
 }

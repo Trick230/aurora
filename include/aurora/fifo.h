@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <aurora/aurora.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -62,6 +64,10 @@ typedef struct AuroraFifoConfig {
   bool ambient_occlusion;
   // AuroraConfig::ambientOcclusionMinHeight.
   float ambient_occlusion_min_height;
+  // Starts borderless over the whole display.
+  bool fullscreen;
+  // AuroraConfig::alphaToCoverage.
+  bool alpha_to_coverage;
 } AuroraFifoConfig;
 
 // Starts the render thread and waits until Aurora is up and every pipeline
@@ -82,6 +88,12 @@ const uint8_t* aurora_fifo_save_state(size_t* size);
 // aurora_fifo_save_state; the stream submitted next continues from it.
 void aurora_fifo_load_state(const uint8_t* data, size_t size);
 void aurora_fifo_stop(void);
+// Any thread: the settings take effect between the next two frames (the
+// latest asked, if several come first).
+void aurora_fifo_set_video(const AuroraVideoSettings* settings);
+// Any thread: the room for a window on the display the window started on (less
+// the taskbar), 0 by 0 before the window is up.
+void aurora_fifo_display_area(uint32_t* width, uint32_t* height);
 
 #ifdef __cplusplus
 }

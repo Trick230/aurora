@@ -483,6 +483,8 @@ bool refresh_surface(bool recreate) {
   return true;
 }
 
+void set_vsync(bool vsync) noexcept { g_graphicsConfig.presentMode = best_present_mode(vsync); }
+
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force) {
   gfx::gpu_synchronize();
   resize_swapchain_internal(width, height, nativeWidth, nativeHeight, force);
