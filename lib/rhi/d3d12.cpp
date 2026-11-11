@@ -983,7 +983,10 @@ std::unique_ptr<Swapchain> D3D12Device::create_swapchain(const SwapchainDesc& de
     return nullptr;
   // The window's owner decides about fullscreen.
   factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
-  result->swapchain->SetMaximumFrameLatency(2);
+  // With vsync one frame waits for the display, not two: a refresh less of
+  // input lag, and still no tearing (variable refresh displays keep theirs:
+  // the swapchain allows tearing, which they need).
+  result->swapchain->SetMaximumFrameLatency(desc.mode == PresentMode::Fifo ? 1 : 2);
   result->waitable = result->swapchain->GetFrameLatencyWaitableObject();
   if (!result->build_images())
     return nullptr;
