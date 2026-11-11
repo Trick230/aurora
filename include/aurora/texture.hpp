@@ -30,6 +30,21 @@ TextureSourceKey source_key(uint32_t format, uint32_t width, uint32_t height, co
 void set_memory_replacement(const TextureSourceKey& key, uint32_t width, uint32_t height, uint32_t mips,
                             std::span<const uint8_t> rgba);
 void remove_memory_replacement(const TextureSourceKey& key);
+
+// A texture as the game hands it over, for a provider to make its replacement.
+struct TextureSource {
+  TextureSourceKey key;
+  uint32_t format = 0, width = 0, height = 0;
+  const void* data = nullptr;  // the base level
+  const void* tlut = nullptr;  // palette formats: the palette's entries
+  uint32_t tlutFormat = 0, tlutEntries = 0;
+};
+
+// Called on the render thread for each texture nothing replaces, as it is
+// first drawn; it may set_memory_replacement() for the source's key, which
+// is then drawn instead. Null clears it.
+using ReplacementProvider = void (*)(const TextureSource& source, void* user);
+void set_replacement_provider(ReplacementProvider provider, void* user);
 } // namespace aurora::texture
 
 #endif

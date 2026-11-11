@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cstring>
 #include <filesystem>
@@ -68,6 +69,8 @@ absl::flat_hash_set<aurora::texture::TextureSourceKey, SourceKeyHash> s_reported
 std::list<aurora::texture::TextureSourceKey> s_replacementLru;
 uint64_t s_replacementCacheBytes = 0;
 uint64_t s_nextEntryId = 1;
+std::atomic<aurora::texture::ReplacementProvider> s_provider = nullptr;
+std::atomic<void*> s_providerUser = nullptr;
 uint64_t s_nextSequence = 1;
 
 unsigned char ascii_lower(unsigned char ch) noexcept {
@@ -768,6 +771,11 @@ void remove_memory_replacement(const TextureSourceKey& key) {
   erase_cache_locked(key);
 }
 
+void set_replacement_provider(ReplacementProvider provider, void* user) {
+  s_providerUser.store(user);
+  s_provider.store(provider);
+}
+
 void clear_replacements() {
   std::lock_guard lk(s_registryMutex);
   clear_replacement_runtime_state_locked();
@@ -856,26 +864,42 @@ std::optional<TextureHandle> find_source_replacement_locked(const GXTexObj_& obj
   return find_replacement_for_key_locked(*replacementKey);
 }
 
-std::optional<TextureHandle> find_replacement(const GXTexObj_& obj) noexcept {
-
-  std::lock_guard lk(s_registryMutex);
-  if (s_entriesByKey.empty() && !g_config.allowTextureDumps) {
-    return std::nullopt;
+// The replacement registered for the texture, else the provider's (asked
+// with the registry unlocked: it registers through the public calls).
+std::optional<TextureHandle> find_or_provide(const GXTexObj_& obj, const GXTlutObj_* tlut) noexcept {
+  const auto provider = s_provider.load();
+  texture::TextureSourceKey sourceKey;
+  {
+    std::lock_guard lk(s_registryMutex);
+    if (s_entriesByKey.empty() && !g_config.allowTextureDumps && provider == nullptr) {
+      return std::nullopt;
+    }
+    sourceKey = tlut != nullptr ? build_source_key(obj, *tlut) : build_source_key(obj);
+    if (provider == nullptr || find_source_replacement_key_locked(sourceKey).has_value()) {
+      return find_source_replacement_locked(obj, tlut, sourceKey);
+    }
   }
-
-  const auto sourceKey = build_source_key(obj);
-  return find_source_replacement_locked(obj, nullptr, sourceKey);
+  texture::TextureSource source{
+      .key = sourceKey,
+      .format = obj.format(),
+      .width = obj.width(),
+      .height = obj.height(),
+      .data = obj.data,
+  };
+  if (tlut != nullptr) {
+    source.tlut = tlut->data;
+    source.tlutFormat = tlut->format;
+    source.tlutEntries = tlut->numEntries;
+  }
+  provider(source, s_providerUser.load());
+  std::lock_guard lk(s_registryMutex);
+  return find_source_replacement_locked(obj, tlut, sourceKey);
 }
 
+std::optional<TextureHandle> find_replacement(const GXTexObj_& obj) noexcept { return find_or_provide(obj, nullptr); }
+
 std::optional<TextureHandle> find_replacement(const GXTexObj_& obj, const GXTlutObj_& tlut) noexcept {
-
-  std::lock_guard lk(s_registryMutex);
-  if (s_entriesByKey.empty() && !g_config.allowTextureDumps) {
-    return std::nullopt;
-  }
-
-  const auto sourceKey = build_source_key(obj, tlut);
-  return find_source_replacement_locked(obj, &tlut, sourceKey);
+  return find_or_provide(obj, &tlut);
 }
 
 std::string build_texture_replacement_name(const GXTexObj_& obj) noexcept {
