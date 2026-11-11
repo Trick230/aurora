@@ -536,20 +536,32 @@ static inline BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, 
   case GX_BM_SUBTRACT:
     color = {rhi::BlendFactor::One, rhi::BlendFactor::One, rhi::BlendOp::ReverseSubtract};
     break;
-  case GX_BM_LOGIC:
-    switch (op) {
-      DEFAULT_FATAL("unsupported logic op {}", underlying(op));
-    case GX_LO_CLEAR:
-      color = {rhi::BlendFactor::Zero, rhi::BlendFactor::Zero, rhi::BlendOp::Add};
-      break;
-    case GX_LO_COPY:
-      color = {rhi::BlendFactor::One, rhi::BlendFactor::Zero, rhi::BlendOp::Add};
-      break;
-    case GX_LO_NOOP:
-      color = {rhi::BlendFactor::Zero, rhi::BlendFactor::One, rhi::BlendOp::Add};
-      break;
-    }
+  case GX_BM_LOGIC: {
+    // Logic ops approximated with blending, as Dolphin does without logic op
+    // support (exact on 0 and 1 for CLEAR, AND, COPY, NOOP, XOR and OR).
+    using F = rhi::BlendFactor;
+    constexpr auto Add = rhi::BlendOp::Add, Sub = rhi::BlendOp::ReverseSubtract;
+    static constexpr std::array<rhi::BlendComponent, 16> Approximations{{
+        {F::Zero, F::Zero, Add},               // CLEAR
+        {F::Dst, F::Zero, Add},                // AND
+        {F::One, F::OneMinusSrc, Sub},         // REVAND
+        {F::One, F::Zero, Add},                // COPY
+        {F::Dst, F::One, Sub},                 // INVAND
+        {F::Zero, F::One, Add},                // NOOP
+        {F::OneMinusDst, F::OneMinusSrc, Add}, // XOR
+        {F::OneMinusDst, F::One, Add},         // OR
+        {F::OneMinusDst, F::OneMinusSrc, Add}, // NOR
+        {F::OneMinusDst, F::Zero, Add},        // EQUIV
+        {F::OneMinusDst, F::OneMinusDst, Add}, // INV
+        {F::One, F::OneMinusDstAlpha, Add},    // REVOR
+        {F::OneMinusSrc, F::OneMinusSrc, Add}, // INVCOPY
+        {F::OneMinusSrc, F::One, Add},         // INVOR
+        {F::OneMinusDst, F::OneMinusSrc, Add}, // NAND
+        {F::One, F::One, Add},                 // SET
+    }};
+    color = Approximations[underlying(op) & 0xF];
     break;
+  }
   }
   if (dualSource) {
     // The source alpha the color blend reads is the TEV's, in the second output.
