@@ -43,6 +43,8 @@ struct ReplacementEntry {
   uint64_t sequence = 0;
   std::string label;
   std::filesystem::path path;
+  // Set for a replacement the program made in memory instead of a file.
+  std::shared_ptr<const aurora::gfx::ConvertedTexture> memory;
 };
 
 struct SelectedCache {
@@ -627,6 +629,9 @@ aurora::gfx::TextureHandle load_entry_handle(const aurora::texture::TextureSourc
   if (s_failedIds.contains(entry.id)) {
     return {};
   }
+  if (entry.memory) {
+    return create_converted_texture_handle(key, entry, *entry.memory);
+  }
 
   const auto replacement = load_file_replacement(entry);
   if (!replacement.has_value()) {
@@ -718,6 +723,51 @@ void register_file_replacement(const aurora::texture::TextureSourceKey& key, std
 } // namespace
 
 namespace aurora::texture {
+TextureSourceKey source_key(uint32_t format, uint32_t width, uint32_t height, const void* data) {
+  GXTexObj_ obj{};
+  obj.data = data;
+  obj.mWidth = width;
+  obj.mHeight = height;
+  obj.mFormat = format;
+  return build_source_key(obj);
+}
+
+void set_memory_replacement(const TextureSourceKey& key, uint32_t width, uint32_t height, uint32_t mips,
+                            std::span<const uint8_t> rgba) {
+  const uint64_t size = aurora::gfx::calc_texture_size(aurora::rhi::Format::RGBA8Unorm, width, height, mips);
+  if (size == 0 || rgba.size() != size) {
+    Log.warn("texture_replacement: memory replacement {}x{} ({} mips) has {} bytes", width, height, mips, rgba.size());
+    return;
+  }
+  aurora::ByteBuffer data{size};
+  std::memcpy(data.data(), rgba.data(), size);
+  auto texture = std::make_shared<aurora::gfx::ConvertedTexture>(aurora::gfx::ConvertedTexture{
+      .format = aurora::rhi::Format::RGBA8Unorm, .width = width, .height = height, .mips = mips, .data = std::move(data)});
+  std::lock_guard lk(s_registryMutex);
+  auto& entries = s_entriesByKey[key];
+  std::erase_if(entries, [](const ReplacementEntry& entry) { return entry.memory != nullptr; });
+  entries.push_back({
+      .id = s_nextEntryId++,
+      .sequence = s_nextSequence++,
+      .label = "TextureReplacement (memory)",
+      .memory = std::move(texture),
+  });
+  erase_cache_locked(key);
+}
+
+void remove_memory_replacement(const TextureSourceKey& key) {
+  std::lock_guard lk(s_registryMutex);
+  const auto it = s_entriesByKey.find(key);
+  if (it == s_entriesByKey.end()) {
+    return;
+  }
+  std::erase_if(it->second, [](const ReplacementEntry& entry) { return entry.memory != nullptr; });
+  if (it->second.empty()) {
+    s_entriesByKey.erase(it);
+  }
+  erase_cache_locked(key);
+}
+
 void clear_replacements() {
   std::lock_guard lk(s_registryMutex);
   clear_replacement_runtime_state_locked();
