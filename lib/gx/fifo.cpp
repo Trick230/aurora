@@ -219,6 +219,9 @@ bool PumpEvents()
   {
     if (event->type == AURORA_EXIT)
       return false;
+    if (event->type == AURORA_SDL_EVENT && event->sdl.type == SDL_EVENT_KEY_DOWN && !event->sdl.key.repeat &&
+        event->sdl.key.key == SDLK_RETURN && (event->sdl.key.mod & SDL_KMOD_ALT) != 0 && s_host.fullscreen_key)
+      s_host.fullscreen_key(s_host.user);
   }
   return true;
 }

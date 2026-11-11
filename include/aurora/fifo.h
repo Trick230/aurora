@@ -33,6 +33,8 @@ typedef struct AuroraFifoHost {
   // Optional: the host's ImGui windows for the frame the game just finished,
   // drawn over it (and over its interpolated presents) on the render thread.
   void (*draw_ui)(void* user);
+  // Optional: Alt+Enter was pressed (to switch fullscreen).
+  void (*fullscreen_key)(void* user);
 } AuroraFifoHost;
 
 typedef struct AuroraFifoConfig {
