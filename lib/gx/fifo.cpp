@@ -171,6 +171,8 @@ Stats s_stats;
 std::mutex s_video_mutex;
 std::optional<AuroraVideoSettings> s_video;
 std::atomic<uint32_t> s_display_width{0}, s_display_height{0};
+std::atomic<uint32_t> s_window_width{0}, s_window_height{0};
+SDL_Window* s_window = nullptr;  // the fifo thread's
 
 void ApplyVideo()
 {
@@ -208,6 +210,11 @@ std::chrono::steady_clock::time_point s_last_pump;
 bool PumpEvents()
 {
   s_last_pump = std::chrono::steady_clock::now();
+  if (int width = 0, height = 0; s_window && SDL_GetWindowSize(s_window, &width, &height))
+  {
+    s_window_width.store(static_cast<uint32_t>(width));
+    s_window_height.store(static_cast<uint32_t>(height));
+  }
   for (const AuroraEvent* event = aurora_update(); event && event->type != AURORA_NONE; ++event)
   {
     if (event->type == AURORA_EXIT)
@@ -326,6 +333,7 @@ void RenderThread(std::atomic<int>* started)
       s_display_width.store(static_cast<uint32_t>(area.w));
       s_display_height.store(static_cast<uint32_t>(area.h));
     }
+    s_window = info.window;
   }
   aurora::gx::recomp::set_guest_address_resolver(Resolve, nullptr);
   aurora::texture::load_replacement_directory(s_texture_path);
@@ -561,4 +569,10 @@ void aurora_fifo_display_area(uint32_t* width, uint32_t* height)
 {
   *width = s_display_width.load();
   *height = s_display_height.load();
+}
+
+void aurora_fifo_window_size(uint32_t* width, uint32_t* height)
+{
+  *width = s_window_width.load();
+  *height = s_window_height.load();
 }

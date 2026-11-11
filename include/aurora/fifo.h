@@ -94,6 +94,9 @@ void aurora_fifo_set_video(const AuroraVideoSettings* settings);
 // Any thread: the room for a window on the display the window started on (less
 // the taskbar), 0 by 0 before the window is up.
 void aurora_fifo_display_area(uint32_t* width, uint32_t* height);
+// Any thread: the window's size as last known (the display's in fullscreen),
+// 0 by 0 before the window is up.
+void aurora_fifo_window_size(uint32_t* width, uint32_t* height);
 
 #ifdef __cplusplus
 }
