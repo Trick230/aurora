@@ -15,6 +15,7 @@
 #include <memory>
 #include <array>
 #include <cfloat>
+#include <optional>
 
 #define M_PIF 3.14159265358979323846f
 
@@ -458,6 +459,9 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept;
 void copy_tex(const void* dest, GXBool clear) noexcept;
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept;
 void resolve_sampled_textures(const ShaderInfo& info) noexcept;
+// The size of the cached texture resolve_sampled_textures would bind for a
+// texture map, without creating it; nullopt for EFB copies or when not cached.
+std::optional<Vec2<u32>> sampled_texture_size(u32 map) noexcept;
 
 inline float clear_depth_value() {
   const float normalizedDepth = static_cast<float>(g_gxState.clearDepth) / 16777215.f;

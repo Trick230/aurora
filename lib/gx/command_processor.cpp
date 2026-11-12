@@ -1947,8 +1947,193 @@ static u32 vertex_size(GXVtxFmt fmt) {
     UNLIKELY { return calculate_last_vtx_size(fmt); }
 }
 
+// At render scales above 1:1, the outermost render pixel of a 2D sprite taken
+// from an atlas can have its centre almost on the quad's edge, so bilinear
+// filtering blends in the neighbouring atlas texel (a dark seam); at 1:1 it is
+// half a pixel inside. Inset the texcoords of the sides inside the texture by
+// that 1:1 distance, capped at half a texel. Returns the vertices to draw: the
+// originals, or a modified copy in a scratch buffer.
+static const u8* inset_upscaled_sprite_uvs(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* vertices,
+                                           u32 vtxSize, bool bigEndian) {
+  if (prim != GX_QUADS || vtxCount < 4 || g_gxState.projType != GX_ORTHOGRAPHIC) {
+    return vertices;
+  }
+  const auto& logical = g_gxState.logicalViewport;
+  const auto& render = g_gxState.renderViewport;
+  if (!(render.width > logical.width || render.height > logical.height) || logical.width <= 0.f ||
+      logical.height <= 0.f) {
+    return vertices;
+  }
+  if (g_gxState.numTexGens < 1) {
+    return vertices;
+  }
+  const auto& tcg = g_gxState.tcgs[0];
+  if (tcg.type != GX_TG_MTX2x4 || tcg.src != GX_TG_TEX0 || tcg.mtx != GX_IDENTITY ||
+      (g_gxState.dualTexTrans && tcg.postMtx != GX_PTIDENTITY)) {
+    return vertices;
+  }
+  if (g_gxState.vtxDesc[GX_VA_POS] != GX_DIRECT || g_gxState.vtxDesc[GX_VA_TEX0] != GX_DIRECT ||
+      g_gxState.vtxDesc[GX_VA_TEX0MTXIDX] != GX_NONE) {
+    return vertices;
+  }
+  u32 texMap = MaxTextures;
+  for (u32 s = 0; s < g_gxState.numTevStages; ++s) {
+    const auto& stage = g_gxState.tevStages[s];
+    if (stage.texCoordId == GX_TEXCOORD0 && stage.texMapId != GX_TEXMAP_NULL) {
+      texMap = stage.texMapId & 7;
+      break;
+    }
+  }
+  if (texMap == MaxTextures || g_gxState.loadedTextures[texMap].mag_filter() == GX_NEAR) {
+    return vertices;
+  }
+  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+  const auto& posFmt = vtxFmt.attrs[GX_VA_POS];
+  const auto& texFmt = vtxFmt.attrs[GX_VA_TEX0];
+  if (texFmt.type != GX_F32 || texFmt.cnt != GX_TEX_ST) {
+    return vertices;
+  }
+  u32 offset = 0;
+  u32 posOffset = 0;
+  u32 texOffset = 0;
+  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+    const auto attr = static_cast<GXAttr>(i);
+    const auto& attrFmt = vtxFmt.attrs[i];
+    switch (g_gxState.vtxDesc[i]) {
+    case GX_NONE:
+      break;
+    case GX_DIRECT:
+      if (i == GX_VA_POS) {
+        posOffset = offset;
+      } else if (i == GX_VA_TEX0) {
+        texOffset = offset;
+      }
+      offset += comp_type_size(attr, attrFmt.type) * comp_cnt_count(attr, attrFmt.cnt);
+      break;
+    default:
+      offset += (g_gxState.vtxDesc[i] == GX_INDEX16 ? 2 : 1) * ((i == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3) ? 3 : 1);
+      break;
+    }
+  }
+  const u32 posCount = comp_cnt_count(GX_VA_POS, posFmt.cnt);
+  const u32 posSize = comp_type_size(GX_VA_POS, posFmt.type);
+  const float posScale = 1.f / static_cast<float>(1u << posFmt.frac);
+  const auto read_pos = [&](const u8* p) -> float {
+    switch (posFmt.type) {
+    case GX_F32:
+      return read_f32(p, bigEndian);
+    case GX_S16:
+      return static_cast<float>(static_cast<s16>(read_u16(p, bigEndian))) * posScale;
+    case GX_U16:
+      return static_cast<float>(read_u16(p, bigEndian)) * posScale;
+    case GX_S8:
+      return static_cast<float>(static_cast<s8>(*p)) * posScale;
+    default:
+      return static_cast<float>(*p) * posScale;
+    }
+  };
+  // The density of the texture actually sampled (replacements, copies at
+  // render scale), so skip what isn't cached yet.
+  const auto texSize = sampled_texture_size(texMap);
+  if (!texSize) {
+    return vertices;
+  }
+  const float W = static_cast<float>(texSize->x);
+  const float H = static_cast<float>(texSize->y);
+  const float halfW = g_gxState.proj[0][0] * logical.width * 0.5f;
+  const float halfH = g_gxState.proj[1][1] * logical.height * 0.5f;
+  const bool hasMtxIdx = g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_NONE;
+
+  static std::vector<u8> scratch;
+  u8* out = nullptr;
+  const u32 quads = vtxCount / 4;
+  for (u32 q = 0; q < quads; ++q) {
+    float X[4], Y[4], uv[2][4];
+    for (u32 k = 0; k < 4; ++k) {
+      const u8* v = vertices + (q * 4 + k) * vtxSize;
+      const u32 mtx = hasMtxIdx ? std::min<u32>(v[0] / 3, MaxPnMtx - 1)
+                                  : std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1);
+      const auto& m = g_gxState.pnMtx[mtx].pos;
+      const float px = read_pos(v + posOffset);
+      const float py = read_pos(v + posOffset + posSize);
+      const float pz = posCount >= 3 ? read_pos(v + posOffset + posSize * 2) : 0.f;
+      X[k] = (m.m0[0] * px + m.m0[1] * py + m.m0[2] * pz + m.m0[3]) * halfW;
+      Y[k] = (m.m1[0] * px + m.m1[1] * py + m.m1[2] * pz + m.m1[3]) * halfH;
+      uv[0][k] = read_f32(v + texOffset, bigEndian);
+      uv[1][k] = read_f32(v + texOffset + 4, bigEndian);
+    }
+    for (u32 a = 0; a < 2; ++a) {
+      const float size = a == 0 ? W : H;
+      const float* c = uv[a];
+      const float cmin = std::min(std::min(c[0], c[1]), std::min(c[2], c[3]));
+      const float cmax = std::max(std::max(c[0], c[1]), std::max(c[2], c[3]));
+      // Only a side inside the texture has a neighbour to bleed in; one on the
+      // texture's border (or past it, repeating) is the sampler's to handle.
+      if (cmin < 0.f || cmax > 1.f) {
+        continue;
+      }
+      const bool insetMin = cmin * size >= 0.5f;
+      const bool insetMax = cmax * size <= size - 0.5f;
+      if ((!insetMin && !insetMax) || (cmax - cmin) * size < 1.f) {
+        continue;
+      }
+      u32 e = 0;
+      float bestDu = -1.f;
+      for (u32 k = 0; k < 4; ++k) {
+        const float du = std::abs(c[(k + 1) & 3] - c[k]);
+        if (du > bestDu) {
+          bestDu = du;
+          e = k;
+        }
+      }
+      const float dx = X[(e + 1) & 3] - X[e];
+      const float dy = Y[(e + 1) & 3] - Y[e];
+      const float lLog = std::sqrt(dx * dx + dy * dy);
+      if (lLog < 0.5f) {
+        continue;
+      }
+      // An upscaled edge pixel can sample right at the edge, so the inset is
+      // the whole distance the 1:1 sample kept from it: half a texel, or half
+      // a pixel's worth of texels where the sprite is magnified.
+      const float kn = bestDu * size / lLog;
+      const float range = (cmax - cmin) * size;
+      const float d = 0.5f * std::min(1.f, kn);
+      if (d <= 0.f || range <= 4.f * d) {
+        continue;
+      }
+      if (out == nullptr) {
+        const u32 totalVtxBytes = vtxCount * vtxSize;
+        if (scratch.size() < totalVtxBytes) {
+          scratch.resize(totalVtxBytes);
+        }
+        out = scratch.data();
+        std::memcpy(out, vertices, totalVtxBytes);
+      }
+      const float delta = d / size;
+      for (u32 k = 0; k < 4; ++k) {
+        float val = c[k];
+        if (val == cmin && insetMin) {
+          val += delta;
+        } else if (val == cmax && insetMax) {
+          val -= delta;
+        } else {
+          continue;
+        }
+        u32 bits;
+        std::memcpy(&bits, &val, sizeof(bits));
+        if (bigEndian) {
+          bits = bswap(bits);
+        }
+        std::memcpy(out + (q * 4 + k) * vtxSize + texOffset + a * 4, &bits, sizeof(bits));
+      }
+    }
+  }
+  return out != nullptr ? out : vertices;
+}
+
 // The draw's vertices, wherever they came from, with the state in g_gxState.
 static void draw_vertices(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* vertices, u32 vtxSize, bool bigEndian) {
+  vertices = inset_upscaled_sprite_uvs(prim, fmt, vtxCount, vertices, vtxSize, bigEndian);
   const u32 totalVtxBytes = vtxCount * vtxSize;
 
   std::array<u32, GX_VA_MAX_ATTR> arraySizes;

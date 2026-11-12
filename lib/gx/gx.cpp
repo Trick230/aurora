@@ -465,6 +465,38 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
   }
 }
 
+std::optional<Vec2<u32>> sampled_texture_size(u32 map) noexcept {
+  GXTexObj_ obj = g_gxState.loadedTextures[map];
+  recomp::resolve_texture_data(obj);
+  if (!obj.has_data() || g_gxState.copyTextures.contains(obj.data)) {
+    return std::nullopt;
+  }
+  GXTlutObj_ recompTlut{};
+  const GXTlutObj_* tlut = nullptr;
+  if (is_palette_format(obj.format())) {
+    if (!recomp::resolve_texture_tlut(map, &recompTlut)) {
+      return std::nullopt;
+    }
+    tlut = &recompTlut;
+  }
+  const RetailTextureKey key{
+      .data = obj.data,
+      .tlutData = tlut != nullptr ? tlut->data : nullptr,
+      .width = obj.width(),
+      .height = obj.height(),
+      .format = obj.format(),
+      .mipCount = obj.mip_count(),
+      .tlutFormat = tlut != nullptr ? static_cast<u32>(tlut->format) : 0,
+      .tlutEntries = tlut != nullptr ? tlut->numEntries : 0u,
+  };
+  const auto it = s_retailTextures.find(key);
+  if (it == s_retailTextures.end() || !it->second.handle) {
+    return std::nullopt;
+  }
+  const auto& size = it->second.handle->size;
+  return Vec2<u32>{size.width, size.height};
+}
+
 static inline rhi::BlendFactor to_blend_factor(GXBlendFactor fac, bool isDst) {
   switch (fac) {
     DEFAULT_FATAL("invalid blend factor {}", underlying(fac));
