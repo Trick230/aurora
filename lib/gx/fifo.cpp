@@ -340,6 +340,8 @@ void RenderThread(std::atomic<int>* started)
     }
     s_window = info.window;
   }
+  // Which API renders: a requested one that fails falls back to another.
+  std::fprintf(stderr, "[gx] renderer: %s\n", info.backend == BACKEND_VULKAN ? "Vulkan" : "D3D12");
   aurora::gx::recomp::set_guest_address_resolver(Resolve, nullptr);
   aurora_set_gpu_timing(s_stats.enabled);
   aurora::texture::load_replacement_directory(s_texture_path);

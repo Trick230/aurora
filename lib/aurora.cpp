@@ -167,6 +167,9 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
 
   if (!windowCreated) {
+    if (selectedBackend != BACKEND_AUTO)
+      Log.warn("The {} renderer could not start; trying the others",
+               selectedBackend == BACKEND_VULKAN ? "Vulkan" : "D3D12");
     for (const auto backendType : PreferredBackendOrder) {
       selectedBackend = backendType;
       if (!window::create_window()) {
