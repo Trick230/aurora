@@ -227,9 +227,11 @@ public:
   VulkanTexture* pass_color = nullptr;
   VulkanTexture* pass_resolve = nullptr;
   VulkanTexture* pass_depth = nullptr;
+  int32_t timing_pair = -1; // GpuTimer's, while timed
 
   ~VulkanCommandList() override;
   void opened();
+  void stamp(bool start);
 
   void begin() override {
     opened();
@@ -238,8 +240,12 @@ public:
     info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(list, &info);
     layout = VK_NULL_HANDLE;
+    stamp(true);
   }
-  void end() override { vkEndCommandBuffer(list); }
+  void end() override {
+    stamp(false);
+    vkEndCommandBuffer(list);
+  }
 
   void transition(VulkanTexture& texture, VkImageLayout to) {
     if (texture.layout == to)
@@ -457,11 +463,17 @@ public:
   std::vector<VkDescriptorPool> pools;
   std::mutex mutex;
   float max_anisotropy = 16.0f;
+  // Two timestamps per GpuTimer pair; none where the queue can't write them.
+  GpuTimer timer;
+  VkQueryPool timestamps = VK_NULL_HANDLE;
+  double ns_per_tick = 0.0;
 
   ~VulkanDevice() override {
     if (device) {
       vkDeviceWaitIdle(device);
       collect(true);
+      if (timestamps)
+        vkDestroyQueryPool(device, timestamps, nullptr);
       if (init_pool)
         vkDestroyCommandPool(device, init_pool, nullptr);
       for (VkDescriptorPool pool : pools)
@@ -857,9 +869,31 @@ public:
   std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
 
   uint64_t submit(CommandList& list) override {
-    queue_submit(static_cast<VulkanCommandList&>(list).list, VK_NULL_HANDLE, &list);
+    auto& native = static_cast<VulkanCommandList&>(list);
+    queue_submit(native.list, VK_NULL_HANDLE, &list);
+    if (native.timing_pair >= 0) {
+      timer.submitted(native.timing_pair, timeline_value);
+      native.timing_pair = -1;
+    }
+    collect_timing();
     return timeline_value;
   }
+
+  void collect_timing() {
+    uint64_t done = 0;
+    vkGetSemaphoreCounterValue(device, timeline, &done);
+    timer.collect(done, [this](uint32_t pair) -> uint64_t {
+      uint64_t values[2] = {};
+      if (vkGetQueryPoolResults(device, timestamps, pair * 2, 2, sizeof(values), values, sizeof(uint64_t),
+                                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS ||
+          values[1] <= values[0])
+        return 0;
+      return static_cast<uint64_t>(static_cast<double>(values[1] - values[0]) * ns_per_tick);
+    });
+  }
+
+  void set_gpu_timing(bool on) override { timer.set_enabled(on && timestamps); }
+  uint64_t take_gpu_ns() override { return timer.take(); }
 
   bool is_done(uint64_t ticket) override {
     uint64_t done = 0;
@@ -933,10 +967,23 @@ public:
 
 VulkanCommandList::~VulkanCommandList() {
   owner->retired.closed(this);
+  owner->timer.release(timing_pair);
   vkDestroyCommandPool(device, pool, nullptr);
 }
 
 void VulkanCommandList::opened() { owner->retired.opened(this); }
+
+void VulkanCommandList::stamp(bool start) {
+  if (start) {
+    timing_pair = owner->timer.claim(timing_pair);
+    if (timing_pair < 0)
+      return;
+    vkCmdResetQueryPool(list, owner->timestamps, timing_pair * 2, 2);
+    vkCmdWriteTimestamp(list, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, owner->timestamps, timing_pair * 2);
+  } else if (timing_pair >= 0) {
+    vkCmdWriteTimestamp(list, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, owner->timestamps, timing_pair * 2 + 1);
+  }
+}
 
 VulkanBuffer::~VulkanBuffer() {
   owner->retire([allocator = owner->allocator, buffer = buffer, allocation = allocation] {
@@ -1333,6 +1380,16 @@ std::unique_ptr<Device> create_vulkan_device(const DeviceOptions& options, std::
     return nullptr;
   }
   result->pools.push_back(result->new_pool());
+
+  // For GPU timing; without them it stays off.
+  if (families[result->queue_family].timestampValidBits != 0 && chosen.limits.timestampPeriod > 0.0f) {
+    VkQueryPoolCreateInfo timestamps{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    timestamps.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    timestamps.queryCount = GpuTimer::Pairs * 2;
+    if (vkCreateQueryPool(result->device, &timestamps, nullptr, &result->timestamps) != VK_SUCCESS)
+      result->timestamps = VK_NULL_HANDLE;
+    result->ns_per_tick = chosen.limits.timestampPeriod;
+  }
 
   VmaVulkanFunctions functions{};
   functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;

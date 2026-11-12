@@ -357,6 +357,12 @@ public:
   virtual bool is_done(uint64_t ticket) = 0;
   virtual void wait(uint64_t ticket) = 0;
   virtual void wait_idle() = 0;
+
+  // While on, each list begun gets a timestamp at its start and end, for stats.
+  // take_gpu_ns gives the GPU time of the lists done since its last call, from any
+  // thread; 0 where the queue has no timestamps.
+  virtual void set_gpu_timing(bool on) = 0;
+  virtual uint64_t take_gpu_ns() = 0;
 };
 
 struct DeviceOptions {

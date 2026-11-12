@@ -140,19 +140,21 @@ struct Stats
     const uint32_t compiled = totals ? totals->createdPipelines - seen.createdPipelines : 0;
     const uint32_t skipped = totals ? totals->skippedDraws - seen.skippedDraws : 0;
     const uint32_t uber = totals ? totals->uberDraws - seen.uberDraws : 0;
+    const uint64_t gpu_ns = aurora_take_gpu_ns();
+    const double gpu_ms = frames ? gpu_ns / 1e6 / frames : 0.0;
     if (totals)
       seen = *totals;
     std::fprintf(stderr,
                  "[gx] %u fps, %u draws (%u dropped), %.2f MB fifo, %u draw-done, %u tokens, "
                  "%u stalled frame starts, peak %.1f MB uniforms / %.1f MB vertices / %.1f MB arrays per frame, "
                  "ms decode %lld / begin frame %lld / end frame %lld / idle %lld, cpu waits %lld ms, "
-                 "frame ms %.2f sd %.2f max %.2f, %u interpolated presents (%.0f%% of draws blended, %.2f ms each, "
+                 "frame ms %.2f sd %.2f max %.2f, gpu ms %.2f, %u interpolated presents (%.0f%% of draws blended, %.2f ms each, "
                  "%u starved, %u late), %u pipelines compiled, %u draws skipped compiling, %u by the ubershader\n",
                  frames, draws, dropped, bytes / 1048576.0, draw_dones, tokens, stalled_begins,
                  peak_uniforms / 1048576.0, peak_vertices / 1048576.0, peak_storage / 1048576.0,
                  Ms(decode), Ms(begin_frame), Ms(end_frame), Ms(idle),
                  static_cast<long long>(s_cpu_wait_ns.exchange(0, std::memory_order_relaxed) / 1000000), mean, sd,
-                 std::chrono::duration<double, std::milli>(frame_max).count(), presents,
+                 std::chrono::duration<double, std::milli>(frame_max).count(), gpu_ms, presents,
                  interp_draws ? 100.0 * blended / interp_draws : 0.0,
                  presents ? replay_us / 1000.0 / presents : 0.0, starved, late, compiled, skipped, uber);
     std::fflush(stderr);
@@ -339,6 +341,7 @@ void RenderThread(std::atomic<int>* started)
     s_window = info.window;
   }
   aurora::gx::recomp::set_guest_address_resolver(Resolve, nullptr);
+  aurora_set_gpu_timing(s_stats.enabled);
   aurora::texture::load_replacement_directory(s_texture_path);
   if (s_host.thread_started)
     s_host.thread_started(s_host.user);

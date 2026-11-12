@@ -1355,3 +1355,10 @@ rhi::Sampler* sampler_ref(const rhi::SamplerDesc& descriptor) {
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::g_stats; }
 
+void aurora_set_gpu_timing(bool on) {
+  if (aurora::gpu::g_device)
+    aurora::gpu::g_device->set_gpu_timing(on);
+}
+
+uint64_t aurora_take_gpu_ns() { return aurora::gpu::g_device ? aurora::gpu::g_device->take_gpu_ns() : 0; }
+

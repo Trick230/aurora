@@ -230,10 +230,11 @@ public:
   D3D12Texture* pass_color = nullptr;
   D3D12Texture* pass_resolve = nullptr;
   D3D12Texture* pass_depth = nullptr;
+  int32_t timing_pair = -1; // GpuTimer's, while timed
 
   ~D3D12CommandList() override;
   void begin() override;
-  void end() override { list->Close(); }
+  void end() override;
 
   void transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
     if (from == to)
@@ -408,6 +409,12 @@ public:
   std::mutex mutex;
   std::string name;
   DeviceFeatures device_features;
+  // Two timestamps per GpuTimer pair, resolved into a mapped readback buffer.
+  GpuTimer timer;
+  ComPtr<ID3D12QueryHeap> timestamps;
+  ComPtr<ID3D12Resource> timestamp_readback;
+  const uint64_t* timestamp_values = nullptr;
+  double ns_per_tick = 0.0;
 
   ~D3D12Device() override {
     wait_idle();
@@ -758,10 +765,25 @@ public:
     const UINT64 ticket = ++fence_value;
     queue->Signal(fence.Get(), ticket);
     retired.submitted(&list, ticket);
+    if (auto& native = static_cast<D3D12CommandList&>(list); native.timing_pair >= 0) {
+      timer.submitted(native.timing_pair, ticket);
+      native.timing_pair = -1;
+    }
     collect();
+    collect_timing();
     drain_messages();
     return ticket;
   }
+
+  void collect_timing() {
+    timer.collect(fence->GetCompletedValue(), [this](uint32_t pair) -> uint64_t {
+      const uint64_t start = timestamp_values[pair * 2], end = timestamp_values[pair * 2 + 1];
+      return end > start ? static_cast<uint64_t>(static_cast<double>(end - start) * ns_per_tick) : 0;
+    });
+  }
+
+  void set_gpu_timing(bool on) override { timer.set_enabled(on && timestamps); }
+  uint64_t take_gpu_ns() override { return timer.take(); }
 
   bool is_done(uint64_t ticket) override { return fence->GetCompletedValue() >= ticket; }
 
@@ -837,17 +859,33 @@ D3D12BindGroup::~D3D12BindGroup() {
   }
 }
 
-D3D12CommandList::~D3D12CommandList() { owner->retired.closed(this); }
+D3D12CommandList::~D3D12CommandList() {
+  owner->retired.closed(this);
+  owner->timer.release(timing_pair);
+}
 
 void D3D12CommandList::begin() {
   owner->retired.opened(this);
   allocator->Reset();
   list->Reset(allocator.Get(), nullptr);
+  timing_pair = owner->timer.claim(timing_pair);
+  if (timing_pair >= 0)
+    list->EndQuery(owner->timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timing_pair * 2);
   ID3D12DescriptorHeap* heaps[] = {owner->srv_heap.heap.Get(), owner->sampler_heap.heap.Get()};
   list->SetDescriptorHeaps(2, heaps);
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   bound_root = nullptr;
   layout = nullptr;
+}
+
+void D3D12CommandList::end() {
+  if (timing_pair >= 0) {
+    const UINT first = timing_pair * 2;
+    list->EndQuery(owner->timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + 1);
+    list->ResolveQueryData(owner->timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first, 2,
+                           owner->timestamp_readback.Get(), first * sizeof(uint64_t));
+  }
+  list->Close();
 }
 
 void D3D12CommandList::begin_render_pass(const RenderPassDesc& desc) {
@@ -1062,6 +1100,34 @@ std::unique_ptr<Device> create_d3d12_device(const DeviceOptions& options, std::s
     return nullptr;
   }
   result->fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+  // For GPU timing; without them it stays off. Readback memory may stay mapped.
+  UINT64 frequency = 0;
+  D3D12_QUERY_HEAP_DESC timestamps{};
+  timestamps.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+  timestamps.Count = GpuTimer::Pairs * 2;
+  D3D12_HEAP_PROPERTIES readback_heap{};
+  readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+  D3D12_RESOURCE_DESC readback{};
+  readback.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  readback.Width = timestamps.Count * sizeof(uint64_t);
+  readback.Height = 1;
+  readback.DepthOrArraySize = 1;
+  readback.MipLevels = 1;
+  readback.SampleDesc.Count = 1;
+  readback.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  void* mapped = nullptr;
+  if (SUCCEEDED(result->queue->GetTimestampFrequency(&frequency)) && frequency != 0 &&
+      SUCCEEDED(device->CreateQueryHeap(&timestamps, IID_PPV_ARGS(&result->timestamps))) &&
+      SUCCEEDED(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &readback,
+                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                IID_PPV_ARGS(&result->timestamp_readback))) &&
+      SUCCEEDED(result->timestamp_readback->Map(0, nullptr, &mapped))) {
+    result->timestamp_values = static_cast<const uint64_t*>(mapped);
+    result->ns_per_tick = 1e9 / static_cast<double>(frequency);
+  } else {
+    result->timestamps.Reset();
+  }
 
   // What both a color and a depth target support, among the counts the API has.
   for (UINT samples : {2u, 4u, 8u}) {

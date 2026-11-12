@@ -6,6 +6,7 @@
 
 extern "C" {
 #else
+#include "stdbool.h"
 #include "stdint.h"
 #endif
 
@@ -40,6 +41,10 @@ typedef struct {
 } AuroraStats;
 
 const AuroraStats* aurora_get_stats();
+// GPU time of each command list, for stats: off by default, as it records timestamps.
+void aurora_set_gpu_timing(bool on);
+// GPU nanoseconds of the command lists finished since the last call; 0 while off.
+uint64_t aurora_take_gpu_ns();
 
 #ifdef __cplusplus
 }
