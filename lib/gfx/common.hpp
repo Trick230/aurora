@@ -266,7 +266,8 @@ Range push_storage(const uint8_t* data, size_t length);
 // Whether the current frame's fixed staging buffers can still take these sizes
 // (each including its own alignment slack).
 bool frame_has_room(size_t verts, size_t indices, size_t uniforms, size_t storage) noexcept;
-Range push_texture_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage);
+// Rows `sourceStride` bytes apart in `data` (0: bytesPerRow).
+Range push_texture_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage, uint32_t sourceStride = 0);
 
 template <typename State>
 const State& get_state();

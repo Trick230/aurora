@@ -46,6 +46,10 @@ struct ReplacementEntry {
   std::filesystem::path path;
   // Set for a replacement the program made in memory instead of a file.
   std::shared_ptr<const aurora::gfx::ConvertedTexture> memory;
+  // Set for one derived from another memory replacement on the GPU.
+  aurora::gfx::TextureHandle derived;
+
+  bool from_memory() const noexcept { return memory != nullptr || derived != nullptr; }
 };
 
 struct SelectedCache {
@@ -632,6 +636,9 @@ aurora::gfx::TextureHandle load_entry_handle(const aurora::texture::TextureSourc
   if (s_failedIds.contains(entry.id)) {
     return {};
   }
+  if (entry.derived) {
+    return entry.derived;
+  }
   if (entry.memory) {
     return create_converted_texture_handle(key, entry, *entry.memory);
   }
@@ -748,7 +755,7 @@ void set_memory_replacement(const TextureSourceKey& key, uint32_t width, uint32_
       .format = aurora::rhi::Format::RGBA8Unorm, .width = width, .height = height, .mips = mips, .data = std::move(data)});
   std::lock_guard lk(s_registryMutex);
   auto& entries = s_entriesByKey[key];
-  std::erase_if(entries, [](const ReplacementEntry& entry) { return entry.memory != nullptr; });
+  std::erase_if(entries, [](const ReplacementEntry& entry) { return entry.from_memory(); });
   entries.push_back({
       .id = s_nextEntryId++,
       .sequence = s_nextSequence++,
@@ -764,11 +771,73 @@ void remove_memory_replacement(const TextureSourceKey& key) {
   if (it == s_entriesByKey.end()) {
     return;
   }
-  std::erase_if(it->second, [](const ReplacementEntry& entry) { return entry.memory != nullptr; });
+  std::erase_if(it->second, [](const ReplacementEntry& entry) { return entry.from_memory(); });
   if (it->second.empty()) {
     s_entriesByKey.erase(it);
   }
   erase_cache_locked(key);
+}
+
+bool derive_memory_replacement(const TextureSourceKey& key, const TextureSourceKey& base,
+                               std::span<const TextureRect> rects, std::span<const uint8_t> rgba) {
+  std::lock_guard lk(s_registryMutex);
+  // Base's texture: its own if derived, else the one made when it was drawn.
+  aurora::gfx::TextureHandle from;
+  if (const auto* entry = find_selected_entry_locked(base); entry != nullptr && entry->from_memory()) {
+    if (entry->derived) {
+      from = entry->derived;
+    } else if (const auto cache = s_cacheByKey.find(base); cache != s_cacheByKey.end() && cache->second.id == entry->id) {
+      from = cache->second.handle;
+    }
+  }
+  if (!from || from->format != aurora::rhi::Format::RGBA8Unorm) {
+    return false;
+  }
+  const uint32_t width = from->size.width, height = from->size.height, mips = from->mipCount;
+  if (rgba.size() != aurora::gfx::calc_texture_size(aurora::rhi::Format::RGBA8Unorm, width, height, mips)) {
+    Log.warn("texture_replacement: derived replacement of {}x{} ({} mips) has {} bytes", width, height, mips,
+             rgba.size());
+    return false;
+  }
+
+  std::shared_ptr<aurora::rhi::Texture> texture =
+      g_device->create_texture({width, height, mips, 1, aurora::rhi::Format::RGBA8Unorm, aurora::rhi::TextureSampled});
+  std::shared_ptr<aurora::rhi::TextureView> view = texture->create_view({});
+  auto handle = std::make_shared<aurora::gfx::TextureRef>(
+      texture, std::move(view), aurora::gfx::Extent3D{width, height, 1}, aurora::rhi::Format::RGBA8Unorm, mips,
+      aurora::gfx::InvalidTextureFormat);
+  handle->isReplacement = true;
+  std::array<size_t, 16> mipAt{};
+  size_t at = 0;
+  for (uint32_t mip = 0; mip < mips && mip < mipAt.size(); ++mip) {
+    const uint32_t w = std::max(width >> mip, 1u), h = std::max(height >> mip, 1u);
+    mipAt[mip] = at;
+    at += size_t{w} * h * 4;
+    aurora::gfx::queue_texture_upload({.texture = texture, .mip = mip, .size = {w, h, 1}, .source = from->texture});
+  }
+  for (const auto& rect : rects) {
+    if (rect.mip >= mips || rect.mip >= mipAt.size()) {
+      continue;
+    }
+    const uint32_t w = std::max(width >> rect.mip, 1u), h = std::max(height >> rect.mip, 1u);
+    if (rect.width == 0 || rect.height == 0 || rect.x >= w || rect.y >= h || rect.width > w - rect.x ||
+        rect.height > h - rect.y) {
+      continue;
+    }
+    aurora::gfx::queue_texture_upload_rect(rgba.data() + mipAt[rect.mip] + (size_t{rect.y} * w + rect.x) * 4, w * 4,
+                                           texture, rect.mip, rect.x, rect.y, rect.width, rect.height, 4);
+  }
+
+  auto& entries = s_entriesByKey[key];
+  std::erase_if(entries, [](const ReplacementEntry& entry) { return entry.from_memory(); });
+  entries.push_back({
+      .id = s_nextEntryId++,
+      .sequence = s_nextSequence++,
+      .label = "TextureReplacement (derived)",
+      .derived = std::move(handle),
+  });
+  erase_cache_locked(key);
+  return true;
 }
 
 void set_replacement_provider(ReplacementProvider provider, void* user) {

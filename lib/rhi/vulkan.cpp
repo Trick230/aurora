@@ -415,7 +415,7 @@ public:
     VkImageCopy copy{};
     copy.srcSubresource = {from.aspect, region.mip, 0, 1};
     copy.srcOffset = {static_cast<int32_t>(region.x), static_cast<int32_t>(region.y), 0};
-    copy.dstSubresource = {to.aspect, 0, 0, 1};
+    copy.dstSubresource = {to.aspect, region.mip, 0, 1};
     copy.dstOffset = {static_cast<int32_t>(x), static_cast<int32_t>(y), 0};
     copy.extent = {region.width ? region.width : MipExtent(from.width, region.mip),
                    region.height ? region.height : MipExtent(from.height, region.mip), 1};

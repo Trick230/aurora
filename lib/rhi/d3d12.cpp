@@ -383,7 +383,7 @@ public:
     transition(from_texture, D3D12_RESOURCE_STATE_COPY_SOURCE);
     transition(to_texture, D3D12_RESOURCE_STATE_COPY_DEST);
     const auto from = subresource(from_texture, region.mip);
-    const auto to = subresource(to_texture, 0);
+    const auto to = subresource(to_texture, region.mip);
     const D3D12_BOX box{region.x, region.y, 0, region.x + width, region.y + height, 1};
     list->CopyTextureRegion(&to, x, y, 0, &from, &box);
     transition(to_texture, to_texture.rest);

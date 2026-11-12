@@ -296,6 +296,7 @@ public:
                                       const TextureRegion& region) = 0;
   virtual void copy_texture_to_buffer(Texture& source, const TextureRegion& region, Buffer& destination, uint64_t offset,
                                       uint32_t bytes_per_row) = 0;
+  // Into the destination's mip of the same number as the source region's.
   virtual void copy_texture(Texture& source, const TextureRegion& source_region, Texture& destination,
                             uint32_t destination_x, uint32_t destination_y) = 0;
 };

@@ -13,10 +13,17 @@ struct TextureUpload {
   uint32_t mip = 0;
   Extent3D size;
   std::shared_ptr<rhi::Buffer> buffer;
+  uint32_t x = 0, y = 0;  // where in the mip
+  // Set to copy this texture's whole mip instead (same size and format).
+  std::shared_ptr<rhi::Texture> source;
 };
 void queue_texture_upload(TextureUpload upload);
 void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage,
                                std::shared_ptr<rhi::Texture> texture, uint32_t mip, Extent3D size);
+// A rect of `texture`'s mip from rows `sourceStride` bytes apart.
+void queue_texture_upload_rect(const uint8_t* data, uint32_t sourceStride, std::shared_ptr<rhi::Texture> texture,
+                               uint32_t mip, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                               uint32_t bytesPerTexel);
 
 struct TextureFormatInfo {
   uint8_t blockWidth;

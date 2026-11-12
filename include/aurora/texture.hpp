@@ -31,6 +31,19 @@ void set_memory_replacement(const TextureSourceKey& key, uint32_t width, uint32_
                             std::span<const uint8_t> rgba);
 void remove_memory_replacement(const TextureSourceKey& key);
 
+// A region of one mip, in texels.
+struct TextureRect {
+  uint32_t mip = 0, x = 0, y = 0, width = 0, height = 0;
+};
+
+// Replaces the texture `key` names as set_memory_replacement() does, with a
+// texture that differs from `base`'s memory replacement only in `rects`: the
+// GPU copies base's texture and only the rects' texels are uploaded, taken
+// from `rgba` (laid out as set_memory_replacement's, at base's size). False,
+// registering nothing, while base has no texture made yet.
+bool derive_memory_replacement(const TextureSourceKey& key, const TextureSourceKey& base,
+                               std::span<const TextureRect> rects, std::span<const uint8_t> rgba);
+
 // A texture as the game hands it over, for a provider to make its replacement.
 struct TextureSource {
   TextureSourceKey key;

@@ -304,13 +304,14 @@ void queue_texture_upload(TextureUpload upload) {
   current_frame_packet().textureUploads.emplace_back(std::move(upload));
 }
 
-void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage,
-                               std::shared_ptr<rhi::Texture> texture, uint32_t mip, Extent3D size) {
+static void queue_texture_upload_rows(const uint8_t* data, uint32_t sourceStride, uint32_t bytesPerRow,
+                                      uint32_t rowsPerImage, std::shared_ptr<rhi::Texture> texture, uint32_t mip,
+                                      uint32_t x, uint32_t y, Extent3D size) {
   const uint64_t uploadSize = uint64_t{AURORA_ALIGN(bytesPerRow, rhi::CopyRowAlignment)} * rowsPerImage;
   auto& frame = current_frame_packet();
   if (AURORA_ALIGN(frame.textureUpload.size(), rhi::CopyOffsetAlignment) + uploadSize <= TextureUploadSize) {
-    const auto range = push_texture_data(data, bytesPerRow, rowsPerImage);
-    queue_texture_upload(TextureUpload{range.offset, bytesPerRow, std::move(texture), mip, size, nullptr});
+    const auto range = push_texture_data(data, bytesPerRow, rowsPerImage, sourceStride);
+    queue_texture_upload(TextureUpload{range.offset, bytesPerRow, std::move(texture), mip, size, nullptr, x, y});
     return;
   }
 
@@ -318,10 +319,22 @@ void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32
   auto* dst = static_cast<uint8_t*>(buffer->mapped());
   for (uint32_t row = 0; row < rowsPerImage; ++row) {
     memcpy(dst, data, bytesPerRow);
-    data += bytesPerRow;
+    data += sourceStride;
     dst += AURORA_ALIGN(bytesPerRow, rhi::CopyRowAlignment);
   }
-  queue_texture_upload(TextureUpload{0, bytesPerRow, std::move(texture), mip, size, std::move(buffer)});
+  queue_texture_upload(TextureUpload{0, bytesPerRow, std::move(texture), mip, size, std::move(buffer), x, y});
+}
+
+void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage,
+                               std::shared_ptr<rhi::Texture> texture, uint32_t mip, Extent3D size) {
+  queue_texture_upload_rows(data, bytesPerRow, bytesPerRow, rowsPerImage, std::move(texture), mip, 0, 0, size);
+}
+
+void queue_texture_upload_rect(const uint8_t* data, uint32_t sourceStride, std::shared_ptr<rhi::Texture> texture,
+                               uint32_t mip, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                               uint32_t bytesPerTexel) {
+  queue_texture_upload_rows(data, sourceStride, width * bytesPerTexel, height, std::move(texture), mip, x, y,
+                            {width, height, 1});
 }
 
 // The GX draw command last pushed, for draws that merge into it. It is still
@@ -968,10 +981,14 @@ static void copy_staging_to_high_water(rhi::CommandList& list, FramePacket& fram
   if constexpr (UseTextureBuffer) {
     for (size_t i = frame.copied.textureUploadCount; i < op.textureUploads.size(); ++i) {
       const auto& item = *op.textureUploads[i];
+      if (item.source) {
+        list.copy_texture(*item.source, {item.mip, 0, 0, 0, 0}, *item.texture, 0, 0);
+        continue;
+      }
       list.copy_buffer_to_texture(item.buffer ? *item.buffer : *g_stagingBuffers[frame.stagingBuffer],
                                   item.buffer ? item.offset : item.offset + TextureUploadStagingOffset,
                                   AURORA_ALIGN(item.bytesPerRow, rhi::CopyRowAlignment), *item.texture,
-                                  {item.mip, 0, 0, item.size.width, item.size.height});
+                                  {item.mip, item.x, item.y, item.size.width, item.size.height});
     }
     frame.copied.textureUpload = highWater.textureUpload;
     frame.copied.textureUploadCount = op.textureUploads.size();
@@ -1260,13 +1277,13 @@ bool frame_has_room(size_t verts, size_t indices, size_t uniforms, size_t storag
          frame.uniforms.remaining() >= uniforms && frame.storage.remaining() >= storage;
 }
 
-Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {
+Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage, u32 sourceStride) {
   const auto copyBytesPerRow = AURORA_ALIGN(bytesPerRow, rhi::CopyRowAlignment);
   const auto range = map(current_frame_packet().textureUpload, copyBytesPerRow * rowsPerImage, rhi::CopyOffsetAlignment);
   u8* dst = current_frame_packet().textureUpload.data() + range.offset;
   for (u32 i = 0; i < rowsPerImage; ++i) {
     memcpy(dst, data, bytesPerRow);
-    data += bytesPerRow;
+    data += sourceStride != 0 ? sourceStride : bytesPerRow;
     dst += copyBytesPerRow;
   }
   return range;
