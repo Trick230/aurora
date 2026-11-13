@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <vector>
 
 namespace aurora::texture {
 
@@ -29,6 +30,9 @@ TextureSourceKey source_key(uint32_t format, uint32_t width, uint32_t height, co
 // key's previous memory replacement; files keep their own entries.
 void set_memory_replacement(const TextureSourceKey& key, uint32_t width, uint32_t height, uint32_t mips,
                             std::span<const uint8_t> rgba);
+// The same, keeping `rgba` itself instead of a copy.
+void set_memory_replacement(const TextureSourceKey& key, uint32_t width, uint32_t height, uint32_t mips,
+                            std::vector<uint8_t>&& rgba);
 void remove_memory_replacement(const TextureSourceKey& key);
 
 // A region of one mip, in texels.

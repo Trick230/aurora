@@ -39,13 +39,19 @@ constexpr uint64_t kReplacementCacheBudgetBytes = 4294967296; // 4GB
 constexpr uint64_t kReplacementWildcardTextureHash = 0xFFFFFFFFFFFFFFFFull;
 constexpr uint64_t kReplacementWildcardTlutHash = 0xFFFFFFFFFFFFFFFEull;
 
+// RGBA8 texels the program made: the base level then each smaller mip.
+struct MemoryTexture {
+  uint32_t width = 0, height = 0, mips = 0;
+  std::vector<uint8_t> rgba;
+};
+
 struct ReplacementEntry {
   uint64_t id = 0;
   uint64_t sequence = 0;
   std::string label;
   std::filesystem::path path;
   // Set for a replacement the program made in memory instead of a file.
-  std::shared_ptr<const aurora::gfx::ConvertedTexture> memory;
+  std::shared_ptr<const MemoryTexture> memory;
   // Set for one derived from another memory replacement on the GPU.
   aurora::gfx::TextureHandle derived;
 
@@ -549,18 +555,24 @@ std::optional<aurora::gfx::ConvertedTexture> load_file_replacement(const Replace
   };
 }
 
+aurora::gfx::TextureHandle create_texture_handle(aurora::rhi::Format format, uint32_t width, uint32_t height,
+                                                 uint32_t mips, aurora::ArrayRef<uint8_t> data) noexcept {
+  std::shared_ptr<aurora::rhi::Texture> texture =
+      g_device->create_texture({width, height, mips, 1, format, aurora::rhi::TextureSampled});
+  std::shared_ptr<aurora::rhi::TextureView> view = texture->create_view({});
+  auto handle = std::make_shared<aurora::gfx::TextureRef>(std::move(texture), std::move(view),
+                                                          aurora::gfx::Extent3D{width, height, 1}, format, mips,
+                                                          aurora::gfx::InvalidTextureFormat);
+  handle->isReplacement = true;
+  aurora::gfx::write_texture(*handle, data);
+  return handle;
+}
+
 aurora::gfx::TextureHandle create_converted_texture_handle(const aurora::texture::TextureSourceKey& key,
                                                            const ReplacementEntry& entry,
                                                            const aurora::gfx::ConvertedTexture& replacement) noexcept {
-  std::shared_ptr<aurora::rhi::Texture> texture = g_device->create_texture(
-      {replacement.width, replacement.height, replacement.mips, 1, replacement.format, aurora::rhi::TextureSampled});
-  std::shared_ptr<aurora::rhi::TextureView> view = texture->create_view({});
-  auto handle = std::make_shared<aurora::gfx::TextureRef>(
-      std::move(texture), std::move(view), aurora::gfx::Extent3D{replacement.width, replacement.height, 1},
-      replacement.format, replacement.mips, aurora::gfx::InvalidTextureFormat);
-  handle->isReplacement = true;
-  aurora::gfx::write_texture(*handle, replacement.data);
-  return handle;
+  return create_texture_handle(replacement.format, replacement.width, replacement.height, replacement.mips,
+                               replacement.data);
 }
 
 void erase_cache_locked(const aurora::texture::TextureSourceKey& key) noexcept {
@@ -640,7 +652,9 @@ aurora::gfx::TextureHandle load_entry_handle(const aurora::texture::TextureSourc
     return entry.derived;
   }
   if (entry.memory) {
-    return create_converted_texture_handle(key, entry, *entry.memory);
+    const MemoryTexture& memory = *entry.memory;
+    return create_texture_handle(aurora::rhi::Format::RGBA8Unorm, memory.width, memory.height, memory.mips,
+                                 memory.rgba);
   }
 
   const auto replacement = load_file_replacement(entry);
@@ -744,15 +758,18 @@ TextureSourceKey source_key(uint32_t format, uint32_t width, uint32_t height, co
 
 void set_memory_replacement(const TextureSourceKey& key, uint32_t width, uint32_t height, uint32_t mips,
                             std::span<const uint8_t> rgba) {
+  set_memory_replacement(key, width, height, mips, std::vector<uint8_t>(rgba.begin(), rgba.end()));
+}
+
+void set_memory_replacement(const TextureSourceKey& key, uint32_t width, uint32_t height, uint32_t mips,
+                            std::vector<uint8_t>&& rgba) {
   const uint64_t size = aurora::gfx::calc_texture_size(aurora::rhi::Format::RGBA8Unorm, width, height, mips);
   if (size == 0 || rgba.size() != size) {
     Log.warn("texture_replacement: memory replacement {}x{} ({} mips) has {} bytes", width, height, mips, rgba.size());
     return;
   }
-  aurora::ByteBuffer data{size};
-  std::memcpy(data.data(), rgba.data(), size);
-  auto texture = std::make_shared<aurora::gfx::ConvertedTexture>(aurora::gfx::ConvertedTexture{
-      .format = aurora::rhi::Format::RGBA8Unorm, .width = width, .height = height, .mips = mips, .data = std::move(data)});
+  auto texture = std::make_shared<const MemoryTexture>(
+      MemoryTexture{.width = width, .height = height, .mips = mips, .rgba = std::move(rgba)});
   std::lock_guard lk(s_registryMutex);
   auto& entries = s_entriesByKey[key];
   std::erase_if(entries, [](const ReplacementEntry& entry) { return entry.from_memory(); });
