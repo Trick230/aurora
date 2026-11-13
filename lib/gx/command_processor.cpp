@@ -2135,12 +2135,12 @@ static const u8* inset_upscaled_sprite_uvs(GXPrimitive prim, GXVtxFmt fmt, u16 v
   return out != nullptr ? out : vertices;
 }
 
-// How a screen-space draw's vertices hold their positions, for frame
-// interpolation: directly, as F32 or S16 (a 2D layout placed on the CPU), and
-// their colours.
+// How a draw's vertices hold their positions, for frame interpolation:
+// directly, as F32 or S16 (placed on the CPU: a 2D layout, particles, models
+// the game moves vertex by vertex), and their colours.
 // Stride 0 for anything else.
 static gfx::interp::VertexLayout interp_vertex_layout(GXVtxFmt fmt, u32 vtxSize, bool bigEndian) {
-  if (g_gxState.projType != GX_ORTHOGRAPHIC || g_gxState.vtxDesc[GX_VA_POS] != GX_DIRECT || vtxSize > UINT16_MAX) {
+  if (g_gxState.vtxDesc[GX_VA_POS] != GX_DIRECT || vtxSize > UINT16_MAX) {
     return {};
   }
   const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];

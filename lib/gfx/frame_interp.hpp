@@ -7,7 +7,8 @@
 // replay sits between two frames the game really produced.
 //
 // Draws are matched across frames by a key (pipeline, textures, sizes) and
-// their order among draws with the same key; within a draw, matrices are
+// their order among draws with the same key, or, when placed on the CPU, by
+// the nearest centre of their vertices; within a draw, matrices are
 // paired by where the game loaded them from, as a skinned model's bones can
 // land in different matrix slots each frame. A draw with no match, or whose
 // matrices moved too far to be the same object (a camera cut), is drawn as the
@@ -19,10 +20,10 @@
 // the draws, and whether each object stands in the world or follows the
 // camera is guessed.
 //
-// 2D layouts (menus, HUD) are often placed on the CPU: their screen-space
-// draws keep one matrix and carry the positions in their vertices. Those
-// vertices are blended too, written over the frame's own in the vertex buffer
-// for each replay.
+// Some draws are placed on the CPU: 2D layouts (menus, HUD), particles, models
+// the game moves vertex by vertex. They keep one matrix and carry the
+// positions in their vertices. Those vertices are blended too, written over
+// the frame's own in the vertex buffer for each replay.
 
 #include "common.hpp"
 
@@ -55,7 +56,7 @@ struct BlockLayout {
 // space.
 using ViewMatrix = std::array<float, 12>;
 
-// How a screen-space draw's vertices hold their positions, when they hold
+// How a CPU-placed draw's vertices hold their positions, when they hold
 // them directly (stride 0: they don't). type is the GXCompType (GX_F32 or
 // GX_S16), frac its fixed-point bits.
 struct VertexLayout {
