@@ -65,6 +65,8 @@ struct VertexLayout {
   uint8_t count = 0; // 2 or 3 components
   uint8_t frac = 0;
   bool bigEndian = false;
+  uint8_t colour = 0;      // byte offset of the colour (CLR0) in a vertex
+  uint8_t colourBytes = 0; // 3 or 4 channels of a byte, 0: no colour blended
 
   bool operator==(const VertexLayout&) const = default;
 };

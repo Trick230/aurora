@@ -2136,7 +2136,8 @@ static const u8* inset_upscaled_sprite_uvs(GXPrimitive prim, GXVtxFmt fmt, u16 v
 }
 
 // How a screen-space draw's vertices hold their positions, for frame
-// interpolation: directly, as F32 or S16 (a 2D layout placed on the CPU).
+// interpolation: directly, as F32 or S16 (a 2D layout placed on the CPU), and
+// their colours.
 // Stride 0 for anything else.
 static gfx::interp::VertexLayout interp_vertex_layout(GXVtxFmt fmt, u32 vtxSize, bool bigEndian) {
   if (g_gxState.projType != GX_ORTHOGRAPHIC || g_gxState.vtxDesc[GX_VA_POS] != GX_DIRECT || vtxSize > UINT16_MAX) {
@@ -2151,6 +2152,29 @@ static gfx::interp::VertexLayout interp_vertex_layout(GXVtxFmt fmt, u32 vtxSize,
   for (int i = GX_VA_PNMTXIDX; i < GX_VA_POS; ++i) {
     position += g_gxState.vtxDesc[i] != GX_NONE ? 1 : 0;
   }
+  // A direct colour of a byte per channel (fades) blends too.
+  u32 colour = 0;
+  u32 colourBytes = 0;
+  if (g_gxState.vtxDesc[GX_VA_CLR0] == GX_DIRECT) {
+    const auto type = g_gxState.vtxFmts[fmt].attrs[GX_VA_CLR0].type;
+    if (type == GX_RGB8 || type == GX_RGBX8 || type == GX_RGBA8) {
+      colourBytes = type == GX_RGB8 ? 3 : 4;
+      for (int i = GX_VA_PNMTXIDX; i < GX_VA_CLR0; ++i) {
+        const auto attr = static_cast<GXAttr>(i);
+        const auto& attrFmt = g_gxState.vtxFmts[fmt].attrs[i];
+        switch (g_gxState.vtxDesc[i]) {
+        case GX_NONE:
+          break;
+        case GX_DIRECT:
+          colour += comp_type_size(attr, attrFmt.type) * comp_cnt_count(attr, attrFmt.cnt);
+          break;
+        default:
+          colour += (g_gxState.vtxDesc[i] == GX_INDEX16 ? 2 : 1) * ((i == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3) ? 3 : 1);
+          break;
+        }
+      }
+    }
+  }
   return {
       .stride = static_cast<u16>(vtxSize),
       .position = static_cast<u8>(position),
@@ -2158,6 +2182,8 @@ static gfx::interp::VertexLayout interp_vertex_layout(GXVtxFmt fmt, u32 vtxSize,
       .count = static_cast<u8>(comp_cnt_count(GX_VA_POS, posFmt.cnt)),
       .frac = static_cast<u8>(posFmt.frac),
       .bigEndian = bigEndian,
+      .colour = static_cast<u8>(colour),
+      .colourBytes = static_cast<u8>(colourBytes),
   };
 }
 

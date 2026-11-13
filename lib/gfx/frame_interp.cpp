@@ -983,7 +983,7 @@ void set_position_component(uint8_t* p, const VertexLayout& layout, uint32_t c, 
 bool g_verticesBlended = false;
 
 // A screen-space draw placed on the CPU and its older pair: their positions
-// blend when the vertices line up and each moved little on screen (b is the
+// and colours blend when the vertices line up and each moved little on screen (b is the
 // newer block, mtx its position matrix). budget is what the replays' vertex
 // uploads have left.
 void match_vertices(const DrawRecord& draw, const DrawRecord& other, const float* b, const float* mtx,
@@ -1001,6 +1001,10 @@ void match_vertices(const DrawRecord& draw, const DrawRecord& other, const float
     std::array<float, 3> d{};
     for (uint32_t c = 0; c < layout.count; ++c) {
       d[c] = (position_component(cur + v, layout, c) - position_component(prev + v, layout, c)) * unit;
+    }
+    if (layout.colourBytes != 0 &&
+        std::memcmp(cur + v + layout.colour, prev + v + layout.colour, layout.colourBytes) != 0) {
+      moved = true;
     }
     if (d[0] == 0.f && d[1] == 0.f && d[2] == 0.f) {
       continue;
@@ -1348,7 +1352,7 @@ void blend(float t, rhi::CommandList& list, rhi::Buffer& upload) {
   }
 }
 
-// Has the blended positions at t written over the frame's vertices in the
+// Has the blended positions and colours at t written over the frame's vertices in the
 // vertex buffer before what the list goes on to draw; at t = 1, the frame's
 // own vertices back, if blended ones are there.
 void blend_vertices(float t, rhi::CommandList& list, rhi::Buffer& upload) {
@@ -1371,6 +1375,9 @@ void blend_vertices(float t, rhi::CommandList& list, rhi::Buffer& upload) {
           if (a != b) {
             set_position_component(out + v, layout, c, a + (b - a) * t);
           }
+        }
+        for (uint32_t c = v + layout.colour; c < v + layout.colour + layout.colourBytes; ++c) {
+          out[c] = static_cast<uint8_t>(std::lround(prev[c] + (cur[c] - prev[c]) * t));
         }
       }
     }
