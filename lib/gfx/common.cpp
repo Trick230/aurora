@@ -1033,13 +1033,15 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
   }
   const bool copy = passInfo.resolveTarget && (!g_replayingFrame || passInfo.copyReadInFrame);
   const bool resolved = passInfo.resolveTexture && g_resolvedColor.lock() == passInfo.colorTexture;
+  // A pass marked before the occlusion was turned off mid-frame goes without.
+  const bool ambientOcclusion = passInfo.ambientOcclusion && ao::enabled();
   // With ambient occlusion over the multisampled color, its pass resolves it.
   const bool resolve = passInfo.resolveTexture && !resolved &&
-                       !(passInfo.ambientOcclusion && !passInfo.aoResolvedOnly) &&
+                       !(ambientOcclusion && !passInfo.aoResolvedOnly) &&
                        (passInfo.observable || passInfo.aoResolvedOnly ||
                         (copy && !gx::is_depth_format(passInfo.resolveFormat)));
   // With nothing to draw, clear or resolve, only the copy.
-  if (draws || passInfo.clearDepth || resolve || passInfo.ambientOcclusion) {
+  if (draws || passInfo.clearDepth || resolve || ambientOcclusion) {
     rhi::RenderPassDesc passDesc;
     passDesc.color.target = passInfo.colorTexture.get();
     passDesc.color.resolve = resolve ? passInfo.resolveTexture.get() : nullptr;
@@ -1055,7 +1057,7 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
     if (resolve) {
       g_resolvedColor = passInfo.colorTexture;
     }
-    if (passInfo.ambientOcclusion) {
+    if (ambientOcclusion) {
       ao::apply(list, {
                           .color = passInfo.aoResolvedOnly ? passInfo.resolveTexture.get()
                                                            : passInfo.colorTexture.get(),

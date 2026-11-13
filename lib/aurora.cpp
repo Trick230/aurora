@@ -305,6 +305,8 @@ void set_video(const AuroraVideoSettings& s) noexcept {
     gfx::interp::shutdown();
   }
   if (vsync || msaa || scale || ao) {
+    // First, so the pacer replays no frame drawn with what is made again.
+    gfx::interp::discard();
     gfx::render_worker::synchronize();
     g_device->wait_idle();
   }
@@ -321,7 +323,6 @@ void set_video(const AuroraVideoSettings& s) noexcept {
     gfx::ao::initialize();
   }
   if (vsync || msaa || scale) {
-    gfx::interp::discard();  // its replays draw into the targets made again
     gpu::set_vsync(s.vsync);
     gfx::clear_caches();
     gpu::refresh_surface(vsync);
