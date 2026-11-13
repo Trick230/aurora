@@ -32,6 +32,10 @@ static u32 s_viewFrame = UINT32_MAX;
 static std::optional<Mat4x4<float>> s_viewProjection;
 // The position matrices the vertices of the draw being pushed use.
 static u16 s_vtxMatrices = 0;
+// The draw being pushed's vertices, and how they hold positions frame
+// interpolation can blend (stride 0: they don't).
+static std::span<const u8> s_vtxBytes;
+static gfx::interp::VertexLayout s_vtxLayout;
 static constexpr u32 MaxDisplayListDepth = 16;
 
 // Triangle-list indices for a primitive's vertices, appended to buf. The
@@ -2131,6 +2135,32 @@ static const u8* inset_upscaled_sprite_uvs(GXPrimitive prim, GXVtxFmt fmt, u16 v
   return out != nullptr ? out : vertices;
 }
 
+// How a screen-space draw's vertices hold their positions, for frame
+// interpolation: directly, as F32 or S16 (a 2D layout placed on the CPU).
+// Stride 0 for anything else.
+static gfx::interp::VertexLayout interp_vertex_layout(GXVtxFmt fmt, u32 vtxSize, bool bigEndian) {
+  if (g_gxState.projType != GX_ORTHOGRAPHIC || g_gxState.vtxDesc[GX_VA_POS] != GX_DIRECT || vtxSize > UINT16_MAX) {
+    return {};
+  }
+  const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+  if (posFmt.type != GX_F32 && posFmt.type != GX_S16) {
+    return {};
+  }
+  // Only the matrix indices come before the position, a byte each.
+  u32 position = 0;
+  for (int i = GX_VA_PNMTXIDX; i < GX_VA_POS; ++i) {
+    position += g_gxState.vtxDesc[i] != GX_NONE ? 1 : 0;
+  }
+  return {
+      .stride = static_cast<u16>(vtxSize),
+      .position = static_cast<u8>(position),
+      .type = static_cast<u8>(posFmt.type),
+      .count = static_cast<u8>(comp_cnt_count(GX_VA_POS, posFmt.cnt)),
+      .frac = static_cast<u8>(posFmt.frac),
+      .bigEndian = bigEndian,
+  };
+}
+
 // The draw's vertices, wherever they came from, with the state in g_gxState.
 static void draw_vertices(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* vertices, u32 vtxSize, bool bigEndian) {
   vertices = inset_upscaled_sprite_uvs(prim, fmt, vtxCount, vertices, vtxSize, bigEndian);
@@ -2147,6 +2177,8 @@ static void draw_vertices(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8
         s_vtxMatrices |= 1u << std::min<u32>(vertices[v * vtxSize] / 3, MaxPnMtx - 1);
       }
     }
+    s_vtxLayout = interp_vertex_layout(fmt, vtxSize, bigEndian);
+    s_vtxBytes = s_vtxLayout.stride != 0 ? std::span{vertices, totalVtxBytes} : std::span<const u8>{};
   }
 
   // Merge into the previous draw when it was built from identical state,
@@ -2223,8 +2255,8 @@ static void draw_vertices(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8
     }
     lastDraw->vtxCount += vtxCount;
     lastDraw->indexCount += numIndices;
-    if (gfx::interp::enabled() && s_vtxMatrices != 0) {
-      gfx::interp::merge_draw(s_vtxMatrices);
+    if (gfx::interp::enabled()) {
+      gfx::interp::merge_draw(s_vtxMatrices, s_vtxBytes);
     }
     ++gfx::g_mergedDrawCallCount;
     return;
@@ -2412,7 +2444,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         .post = layout.post,
         .camera = camera,
         .used = s_vtxMatrices != 0 ? s_vtxMatrices : static_cast<u16>(1u << std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1)),
-    });
+        .vertOffset = vertRange.offset,
+        .vertices = s_vtxLayout,
+    }, s_vtxBytes);
   }
   if (drawn != pipeline) {
     ++gfx::g_stats.uberDraws;

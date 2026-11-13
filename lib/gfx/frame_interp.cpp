@@ -74,6 +74,7 @@ struct Frame {
   ByteBuffer uniforms;
   std::vector<DrawRecord> draws;
   std::vector<ViewMatrix> cameras;
+  std::vector<uint8_t> vertices;
   ReplayFn replay;
   EndFrameCallback present;
   SubmitFn submit;
@@ -156,12 +157,15 @@ std::unique_ptr<rhi::Buffer> g_buffer;
 std::unique_ptr<rhi::BindGroup> g_bindGroup;
 // The group draws bind when they aren't replaying.
 rhi::BindGroup* g_frameBindGroup = nullptr;
-// A replay's list and what it copies into g_buffer, reused once its ticket is done.
+// A replay's list, what it copies into g_buffer and the blended vertices it
+// copies into the vertex buffer, reused once its ticket is done.
 struct Replay {
   std::unique_ptr<rhi::CommandList> list;
   std::unique_ptr<rhi::Buffer> upload;
+  std::unique_ptr<rhi::Buffer> vertexUpload;
   uint64_t ticket = 0;
 };
+constexpr uint32_t VertexUploadSize = 1u << 20;
 constexpr size_t ReplayCount = 4;
 std::array<Replay, ReplayCount> g_replays;
 size_t g_nextReplay = 0;
@@ -173,6 +177,17 @@ Frame g_cur;
 // The newest frame, held back (unsubmitted) while g_cur is still shown.
 Frame g_next;
 std::vector<Blend> g_blends;
+// A screen-space draw whose vertices hold their positions, paired with the
+// older frame's: byte offsets of its vertices in g_cur.vertices,
+// g_prev.vertices and the vertex buffer.
+struct VertexBlend {
+  uint32_t cur;
+  uint32_t prev;
+  uint32_t gpu;
+  uint32_t bytes;
+  VertexLayout layout;
+};
+std::vector<VertexBlend> g_vertexBlends;
 // Older matrices brought into the newer frame's eye space, slot for slot.
 std::vector<float> g_older;
 ByteBuffer g_scratch;
@@ -933,10 +948,81 @@ bool stands_still(const float* a, const float* b) {
          rotation_distance2(moved.data(), b) < 1e-6f * scale;
 }
 
+// How far, in NDC, a vertex of a screen-space layout may move in one game
+// frame to be blended: further, it is another element than its pair's.
+constexpr float MaxScreenMove = 0.5f;
+
+// Component c of the position of the vertex at p, raw: a float, or the
+// fixed-point integer.
+float position_component(const uint8_t* p, const VertexLayout& layout, uint32_t c) {
+  p += layout.position;
+  if (layout.type == GX_F32) {
+    uint32_t bits;
+    std::memcpy(&bits, p + c * 4, 4);
+    return std::bit_cast<float>(layout.bigEndian ? bswap(bits) : bits);
+  }
+  uint16_t bits;
+  std::memcpy(&bits, p + c * 2, 2);
+  return static_cast<int16_t>(layout.bigEndian ? bswap(bits) : bits);
+}
+
+void set_position_component(uint8_t* p, const VertexLayout& layout, uint32_t c, float value) {
+  p += layout.position;
+  if (layout.type == GX_F32) {
+    uint32_t bits = std::bit_cast<uint32_t>(value);
+    bits = layout.bigEndian ? bswap(bits) : bits;
+    std::memcpy(p + c * 4, &bits, 4);
+    return;
+  }
+  auto bits = static_cast<uint16_t>(static_cast<int16_t>(std::clamp(std::lround(value), -32768l, 32767l)));
+  bits = layout.bigEndian ? bswap(bits) : bits;
+  std::memcpy(p + c * 2, &bits, 2);
+}
+
+// The vertex buffer holds blended vertices of the shown frame.
+bool g_verticesBlended = false;
+
+// A screen-space draw placed on the CPU and its older pair: their positions
+// blend when the vertices line up and each moved little on screen (b is the
+// newer block, mtx its position matrix). budget is what the replays' vertex
+// uploads have left.
+void match_vertices(const DrawRecord& draw, const DrawRecord& other, const float* b, const float* mtx,
+                    uint32_t& budget) {
+  const auto& layout = draw.vertices;
+  const uint32_t size = AURORA_ALIGN(draw.vertBytes, 4);
+  if (other.vertBytes != draw.vertBytes || !(other.vertices == layout) || size > budget) {
+    return;
+  }
+  const uint8_t* cur = g_cur.vertices.data() + draw.vertData;
+  const uint8_t* prev = g_prev.vertices.data() + other.vertData;
+  const float unit = layout.type == GX_F32 ? 1.f : std::ldexp(1.f, -static_cast<int>(layout.frac));
+  bool moved = false;
+  for (uint32_t v = 0; v < draw.vertBytes; v += layout.stride) {
+    std::array<float, 3> d{};
+    for (uint32_t c = 0; c < layout.count; ++c) {
+      d[c] = (position_component(cur + v, layout, c) - position_component(prev + v, layout, c)) * unit;
+    }
+    if (d[0] == 0.f && d[1] == 0.f && d[2] == 0.f) {
+      continue;
+    }
+    moved = true;
+    const float x = mtx[0] * d[0] + mtx[1] * d[1] + mtx[2] * d[2];
+    const float y = mtx[4] * d[0] + mtx[5] * d[1] + mtx[6] * d[2];
+    if (!(std::abs(x * b[0]) <= MaxScreenMove && std::abs(y * b[5]) <= MaxScreenMove)) {
+      return;
+    }
+  }
+  if (moved) {
+    g_vertexBlends.push_back({draw.vertData, other.vertData, draw.vertOffset, draw.vertBytes, layout});
+    budget -= size;
+  }
+}
+
 // Pairs each draw of the newer frame with a draw of the older one and keeps
 // the pairs worth blending.
 void match() {
   g_blends.clear();
+  g_vertexBlends.clear();
   g_dirtyBegin = UINT32_MAX;
   g_dirtyEnd = 0;
   const auto& prev = g_prev.draws;
@@ -991,6 +1077,7 @@ void match() {
   }
   uint32_t matched = 0;
   uint32_t implausible = 0;
+  uint32_t vertexBudget = VertexUploadSize;
   for (size_t i = 0; i < g_cur.draws.size(); ++i) {
     const auto& draw = g_cur.draws[i];
     if (draw.offset + BlendBytes > curSize) {
@@ -1002,6 +1089,11 @@ void match() {
       continue;
     }
     const auto& other = prev[j];
+    // Its vertices blend whether or not its block does (a menu's draws share
+    // one), and through camera cuts, which don't move the screen.
+    if (draw.vertBytes != 0) {
+      match_vertices(draw, other, curBase + draw.offset / 4, current_matrix(curBase, draw), vertexBudget);
+    }
     const uint16_t camera = camera_of(draw);
     use_camera(camera);
     // Draws with the same GX state share a uniform block; the first match
@@ -1050,7 +1142,10 @@ void match() {
     // camera (sky, effects around the player), as it is.
     const float* currentA = a + prev_start(item, 1 + draw.current);
     const float* currentB = b + matrix_start(1 + draw.current);
-    if (camera != 0) {
+    const bool screen = b[15] != 0.f;
+    if (screen) {
+      // A screen-space draw (orthographic projection) has no camera.
+    } else if (camera != 0) {
       // Built with a camera the game gave: wherever the object goes, it goes
       // there in the world.
       item.cameraRotation = g_cameraMoved;
@@ -1103,7 +1198,7 @@ void match() {
       continue;
     }
     store_older(item, a);
-    if (g_cameraMoved && camera == 0) {
+    if (g_cameraMoved && camera == 0 && !screen) {
       const Modes modes{item.cameraRotation, item.cameraTranslation};
       g_keyModes.insert_or_assign(draw.key, modes);
       g_groupModes.insert_or_assign(draw.group, modes);
@@ -1253,6 +1348,42 @@ void blend(float t, rhi::CommandList& list, rhi::Buffer& upload) {
   }
 }
 
+// Has the blended positions at t written over the frame's vertices in the
+// vertex buffer before what the list goes on to draw; at t = 1, the frame's
+// own vertices back, if blended ones are there.
+void blend_vertices(float t, rhi::CommandList& list, rhi::Buffer& upload) {
+  if (g_vertexBlends.empty() || (t >= 1.f && !g_verticesBlended)) {
+    return;
+  }
+  auto* const mapped = static_cast<uint8_t*>(upload.mapped());
+  uint32_t at = 0;
+  for (const auto& item : g_vertexBlends) {
+    uint8_t* out = mapped + at;
+    const uint8_t* cur = g_cur.vertices.data() + item.cur;
+    std::memcpy(out, cur, item.bytes);
+    if (t < 1.f) {
+      const uint8_t* prev = g_prev.vertices.data() + item.prev;
+      const auto& layout = item.layout;
+      for (uint32_t v = 0; v < item.bytes; v += layout.stride) {
+        for (uint32_t c = 0; c < layout.count; ++c) {
+          const float a = position_component(prev + v, layout, c);
+          const float b = position_component(cur + v, layout, c);
+          if (a != b) {
+            set_position_component(out + v, layout, c, a + (b - a) * t);
+          }
+        }
+      }
+    }
+    // Copies take whole words: the draw starts on one, and the bytes up to the
+    // next are the padding before the next draw's vertices.
+    const uint32_t size = AURORA_ALIGN(item.bytes, 4);
+    std::memset(out + item.bytes, 0, size - item.bytes);
+    list.copy_buffer(upload, at, gfx::vertex_buffer(), item.gpu, size);
+    at += size;
+  }
+  g_verticesBlended = t < 1.f;
+}
+
 // The next replay's list, begun, once the GPU has finished with its last use.
 Replay& begin_replay() {
   auto& replay = g_replays[g_nextReplay];
@@ -1276,10 +1407,11 @@ void activate(Clock::time_point base) {
   g_cur = std::move(g_next);
   g_next = {};
   g_base = base;
+  g_verticesBlended = false;
   match();
   ++g_stats.interpFrames;
   g_stats.interpDraws += static_cast<uint32_t>(g_cur.draws.size());
-  g_stats.interpBlendedDraws += static_cast<uint32_t>(g_blends.size());
+  g_stats.interpBlendedDraws += static_cast<uint32_t>(g_blends.size() + g_vertexBlends.size());
   g_scratch.clear();
   g_scratch.append(g_cur.uniforms.data(), g_cur.uniforms.size());
   g_uploaded = false;
@@ -1297,6 +1429,7 @@ void capture(float t, const char* name) {
   const auto buffer = g_device->create_buffer({uint64_t{row} * height, rhi::MemoryKind::Readback});
   auto& replay = begin_replay();
   blend(t, *replay.list, *replay.upload);
+  blend_vertices(t, *replay.list, *replay.vertexUpload);
   g_vertexUniformBindGroup = g_bindGroup.get();
   g_replaying.store(true, std::memory_order_relaxed);
   g_cur.replay(*replay.list);
@@ -1366,7 +1499,7 @@ void present_tick() {
   }
   const float unclamped = time_at(shown);
   const float t = std::clamp(unclamped, 0.f, 1.f);
-  const bool last = (t >= 1.f || g_blends.empty()) && !g_next.submit;
+  const bool last = (t >= 1.f || (g_blends.empty() && g_vertexBlends.empty())) && !g_next.submit;
   // Past the end with nothing newer while the game is still sending frames:
   // the picture stops until the late one arrives. A paused game's last frame
   // runs far past the end and isn't counted.
@@ -1376,6 +1509,7 @@ void present_tick() {
   auto& replay = begin_replay();
   static const bool noBlend = std::getenv("AURORA_INTERP_NOBLEND") != nullptr;
   blend(last || noBlend ? 1.f : t, *replay.list, *replay.upload);
+  blend_vertices(last || noBlend ? 1.f : t, *replay.list, *replay.vertexUpload);
   g_vertexUniformBindGroup = g_bindGroup.get();
   g_replaying.store(true, std::memory_order_relaxed);
   g_cur.replay(*replay.list);
@@ -1475,6 +1609,7 @@ void initialize(bool vsync, uint32_t presentRate) {
   for (auto& replay : g_replays) {
     replay.list = g_device->create_command_list();
     replay.upload = g_device->create_buffer({UniformBufferSize, rhi::MemoryKind::Upload});
+    replay.vertexUpload = g_device->create_buffer({VertexUploadSize, rhi::MemoryKind::Upload});
     replay.ticket = 0;
   }
   rhi::BindingValue value{};
@@ -1513,6 +1648,7 @@ void shutdown() {
   g_cur = {};
   g_scratch.release();
   g_blends.clear();
+  g_vertexBlends.clear();
   g_device->wait_idle();
   g_vertexUniformBindGroup = g_frameBindGroup;
   g_bindGroup.reset();
@@ -1534,6 +1670,7 @@ void discard() {
     g_prev = {};
     g_cur = {};
     g_blends.clear();
+    g_vertexBlends.clear();
   };
   if (render_worker::is_worker_thread()) {
     // The pacer waits for this tick of the worker's to end before its next.
@@ -1555,8 +1692,8 @@ bool enabled() noexcept { return g_enabled; }
 
 bool replaying() noexcept { return g_replaying.load(std::memory_order_relaxed); }
 
-void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, std::vector<ViewMatrix> cameras, ReplayFn replay,
-                EndFrameCallback present, SubmitFn submit) {
+void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, std::vector<ViewMatrix> cameras,
+                std::vector<uint8_t> vertices, ReplayFn replay, EndFrameCallback present, SubmitFn submit) {
   const auto now = Clock::now();
   if (g_lastArrival != Clock::time_point{}) {
     const auto delta = now - g_lastArrival;
@@ -1569,8 +1706,8 @@ void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, std::vector<
     // The game got ahead of the replays: drop the rest of the frame shown.
     activate(g_base + g_period);
   }
-  g_next = Frame{std::move(uniforms), std::move(draws), std::move(cameras), std::move(replay), std::move(present),
-                 std::move(submit), now};
+  g_next = Frame{std::move(uniforms), std::move(draws), std::move(cameras), std::move(vertices), std::move(replay),
+                 std::move(present), std::move(submit), now};
   std::lock_guard lock{g_mutex};
   if (!g_cur.replay || !g_pending) {
     // Nothing left to show of the frame before: start on this one, a little

@@ -175,10 +175,11 @@ struct FramePacket {
   StagingHighWater copied;
   AuroraStats stats{};
   // With frame interpolation: a CPU copy of the uniform stream, and the GX
-  // draws' blocks in it.
+  // draws' blocks in it; a copy of the vertices draws keep for blending.
   ByteBuffer uniformShadow;
   std::vector<interp::DrawRecord> interpDraws;
   std::vector<interp::ViewMatrix> interpCameras;
+  std::vector<uint8_t> interpVertices;
 };
 
 static std::array<FramePacket, FrameSlotCount> g_framePackets;
@@ -887,9 +888,10 @@ void end_frame(EndFrameCallback callback) {
       auto uniforms = std::move(packet.uniformShadow);
       auto draws = std::move(packet.interpDraws);
       auto cameras = std::move(packet.interpCameras);
+      auto vertices = std::move(packet.interpVertices);
       packet = {};
       interp::push_frame(
-          std::move(uniforms), std::move(draws), std::move(cameras),
+          std::move(uniforms), std::move(draws), std::move(cameras), std::move(vertices),
           [retained](rhi::CommandList& replay) {
             g_replayedFrameIndex = retained->frameIndex;
             replay_frame(replay, *retained);
@@ -1117,14 +1119,36 @@ static void replay_frame(rhi::CommandList& list, FramePacket& frame) {
   g_replayingFrame = false;
 }
 
-void interp::record_draw(const DrawRecord& record) { current_frame_packet().interpDraws.push_back(record); }
-
-void interp::merge_draw(uint16_t used) {
-  auto& draws = current_frame_packet().interpDraws;
-  if (!draws.empty()) {
-    draws.back().used |= used;
+void interp::record_draw(const DrawRecord& record, std::span<const uint8_t> vertices) {
+  auto& packet = current_frame_packet();
+  auto& draw = packet.interpDraws.emplace_back(record);
+  if (draw.vertices.stride != 0 && !vertices.empty()) {
+    draw.vertData = static_cast<uint32_t>(packet.interpVertices.size());
+    draw.vertBytes = static_cast<uint32_t>(vertices.size());
+    packet.interpVertices.insert(packet.interpVertices.end(), vertices.begin(), vertices.end());
   }
 }
+
+void interp::merge_draw(uint16_t used, std::span<const uint8_t> vertices) {
+  auto& packet = current_frame_packet();
+  if (packet.interpDraws.empty()) {
+    return;
+  }
+  auto& draw = packet.interpDraws.back();
+  draw.used |= used;
+  if (draw.vertBytes == 0) {
+    return;
+  }
+  if (vertices.empty() || draw.vertData + draw.vertBytes != packet.interpVertices.size()) {
+    // Part of its vertices unkept: none are blended.
+    draw.vertBytes = 0;
+    return;
+  }
+  draw.vertBytes += static_cast<uint32_t>(vertices.size());
+  packet.interpVertices.insert(packet.interpVertices.end(), vertices.begin(), vertices.end());
+}
+
+rhi::Buffer& vertex_buffer() { return *g_vertexBuffer; }
 
 uint16_t interp::record_camera(const ViewMatrix& view) {
   auto& cameras = current_frame_packet().interpCameras;

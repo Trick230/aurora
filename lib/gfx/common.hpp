@@ -198,6 +198,8 @@ extern uint32_t g_drawCallCount;
 extern uint32_t g_mergedDrawCallCount;
 extern uint32_t g_droppedDrawCallCount;
 extern rhi::Buffer* g_uniformBuffer;
+// The GPU buffer the frames' vertices are copied into.
+rhi::Buffer& vertex_buffer();
 extern rhi::BindGroupLayout* g_staticBindGroupLayout;
 extern rhi::BindGroupLayout* g_uniformBindGroupLayout;
 

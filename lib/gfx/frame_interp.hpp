@@ -18,10 +18,16 @@
 // through the camera's own move. Elsewhere the camera move is estimated from
 // the draws, and whether each object stands in the world or follows the
 // camera is guessed.
+//
+// 2D layouts (menus, HUD) are often placed on the CPU: their screen-space
+// draws keep one matrix and carry the positions in their vertices. Those
+// vertices are blended too, written over the frame's own in the vertex buffer
+// for each replay.
 
 #include "common.hpp"
 
 #include <array>
+#include <span>
 #include <vector>
 
 namespace aurora::gfx::interp {
@@ -49,6 +55,20 @@ struct BlockLayout {
 // space.
 using ViewMatrix = std::array<float, 12>;
 
+// How a screen-space draw's vertices hold their positions, when they hold
+// them directly (stride 0: they don't). type is the GXCompType (GX_F32 or
+// GX_S16), frac its fixed-point bits.
+struct VertexLayout {
+  uint16_t stride = 0;
+  uint8_t position = 0; // byte offset of the position in a vertex
+  uint8_t type = 0;
+  uint8_t count = 0; // 2 or 3 components
+  uint8_t frac = 0;
+  bool bigEndian = false;
+
+  bool operator==(const VertexLayout&) const = default;
+};
+
 struct DrawRecord {
   HashType key;   // pipeline, textures and sizes
   HashType group; // pipeline and textures, for draws whose sizes changed
@@ -59,6 +79,12 @@ struct DrawRecord {
   uint16_t post;
   uint16_t camera;  // 1 + the frame's camera the draw's matrices were built with, 0 if unknown
   uint16_t used;    // bit n: its vertices use position matrix n
+  // With vertices.stride set: where its vertices are in the vertex buffer,
+  // and in the frame's CPU copy of such vertices (vertBytes 0: none kept).
+  uint32_t vertOffset = 0;
+  VertexLayout vertices{};
+  uint32_t vertData = 0;
+  uint32_t vertBytes = 0;
 };
 
 // Encodes the retained frame's passes again into the encoder.
@@ -83,20 +109,21 @@ extern rhi::BindGroup* g_vertexUniformBindGroup;
 // Interpolation resumes with the next frame.
 void discard();
 
-// Render thread, while recording: notes a GX draw's uniform block.
-void record_draw(const DrawRecord& record);
+// Render thread, while recording: notes a GX draw's uniform block, and keeps
+// a copy of its vertices when record.vertices.stride is set.
+void record_draw(const DrawRecord& record, std::span<const uint8_t> vertices);
 // Render thread, while recording: a draw merged into the last one recorded
-// adds the position matrices its vertices use.
-void merge_draw(uint16_t used);
+// adds the position matrices its vertices use, and its vertices.
+void merge_draw(uint16_t used, std::span<const uint8_t> vertices);
 // Render thread, while recording: notes a camera of the frame, returning the
 // value for DrawRecord::camera.
 uint16_t record_camera(const ViewMatrix& view);
 
 // Render worker: a frame was recorded. uniforms is a CPU copy of its uniform
-// stream; submit is called once the frame before it has been fully shown (its
-// replays need the GPU buffers as that frame left them), then it is replayed;
-// present finishes an encoder, submits it and presents.
-void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, std::vector<ViewMatrix> cameras, ReplayFn replay,
-                EndFrameCallback present, SubmitFn submit);
+// stream, vertices a copy of the vertices its draws keep; submit is called
+// once the frame before it has been fully shown (its replays need the GPU
+// buffers as that frame left them), then it is replayed; present finishes an encoder, submits it and presents.
+void push_frame(ByteBuffer uniforms, std::vector<DrawRecord> draws, std::vector<ViewMatrix> cameras,
+                std::vector<uint8_t> vertices, ReplayFn replay, EndFrameCallback present, SubmitFn submit);
 
 } // namespace aurora::gfx::interp
