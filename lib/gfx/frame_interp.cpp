@@ -1538,20 +1538,25 @@ void present_tick() {
   }
 }
 
+// Sleeps to just short of target, then spins the rest: the timer wakes up
+// to a scheduler tick late.
 void sleep_until(Clock::time_point target, [[maybe_unused]] void* timer) {
+  constexpr auto Spin = std::chrono::microseconds{500};
+  const auto wake = target - Spin;
   const auto now = Clock::now();
-  if (target <= now) {
-    return;
-  }
+  if (wake > now) {
 #ifdef _WIN32
-  LARGE_INTEGER due;
-  due.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(target - now).count() / 100;
-  if (timer != nullptr && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
-    WaitForSingleObject(timer, INFINITE);
-    return;
-  }
+    LARGE_INTEGER due;
+    due.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(wake - now).count() / 100;
+    if (timer != nullptr && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
+      WaitForSingleObject(timer, INFINITE);
+    } else
 #endif
-  std::this_thread::sleep_until(target);
+      std::this_thread::sleep_until(wake);
+  }
+  while (Clock::now() < target) {
+    std::this_thread::yield();
+  }
 }
 
 // Asks the render worker for one replay at a time: back to back with vsync,
@@ -1603,9 +1608,10 @@ void pacer_main() {
 void initialize(bool vsync, uint32_t presentRate) {
   g_vsync = vsync;
   float rate = static_cast<float>(presentRate);
-  if (presentRate == AURORA_PRESENT_UNLIMITED) {
+  // With vsync the display's refresh paces the presents, whatever the rate.
+  if (presentRate == AURORA_PRESENT_UNLIMITED && !vsync) {
     rate = 0.f;
-  } else if (rate <= 0.f) {
+  } else if (rate <= 0.f || vsync) {
     const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window::get_sdl_window()));
     rate = mode != nullptr && mode->refresh_rate > 0.f ? mode->refresh_rate : 60.f;
   }
