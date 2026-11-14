@@ -1067,10 +1067,34 @@ void vertex_centres(std::vector<Vec3>& out, const Frame& frame) {
   }
 }
 
+// Whether two draws laid out alike carry the same vertices but for their
+// positions and colours: the same piece of a texture (a menu's sprites, all
+// from one sheet, differ only in where they read it).
+bool same_piece(const DrawRecord& draw, const DrawRecord& other, const std::vector<uint8_t>& curVertices,
+                const std::vector<uint8_t>& prevVertices) {
+  const auto& layout = draw.vertices;
+  const uint32_t positionEnd = layout.position + layout.count * (layout.type == GX_F32 ? 4u : 2u);
+  const uint32_t colourEnd = layout.colour + layout.colourBytes;
+  const uint8_t* a = curVertices.data() + draw.vertData;
+  const uint8_t* b = prevVertices.data() + other.vertData;
+  for (uint32_t v = 0; v < draw.vertBytes; v += layout.stride) {
+    for (uint32_t k = 0; k < layout.stride; ++k) {
+      const bool position = k >= layout.position && k < positionEnd;
+      const bool colour = layout.colourBytes != 0 && k >= layout.colour && k < colourEnd;
+      if (!position && !colour && a[v + k] != b[v + k]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 // The older draw for draw i of the newer frame, whose vertices are kept:
 // among the older draws with its key and as many vertices laid out alike, the
 // one centred closest to it (exact: only one centred where it is). The game
 // draws them in the order it spawned them, which shifts as they come and go.
+// On screen, one showing the same piece goes first: a menu's sprites from one
+// sheet (a book and its number) close in as they grow would otherwise swap.
 // found says whether any such draw was there; if none, it pairs as others do.
 uint32_t pick_vertices(const DrawRecord& draw, size_t i, bool screen, bool exact, bool& found) {
   found = false;
@@ -1080,7 +1104,9 @@ uint32_t pick_vertices(const DrawRecord& draw, size_t i, bool screen, bool exact
   }
   const Vec3& target = g_curCentres[i];
   uint32_t best = NoMatch;
-  float bestDistance = exact ? 1e-4f * length2(target) + 1e-4f : INFINITY;
+  const float limit = exact ? 1e-4f * length2(target) + 1e-4f : INFINITY;
+  float bestDistance = INFINITY;
+  bool bestSame = false;
   for (uint32_t k = it->second.begin; k < it->second.end; ++k) {
     const uint32_t j = g_byKey.slots[k].index;
     const auto& other = g_prev.draws[j];
@@ -1098,10 +1124,16 @@ uint32_t pick_vertices(const DrawRecord& draw, size_t i, bool screen, bool exact
     if (!screen) {
       distance = std::min(distance, distance2(transform_point(g_camera, at), target));
     }
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = j;
+    if (distance >= limit) {
+      continue;
     }
+    const bool same = screen && same_piece(draw, other, g_cur.vertices, g_prev.vertices);
+    if (same < bestSame || (same == bestSame && distance >= bestDistance)) {
+      continue;
+    }
+    bestDistance = distance;
+    best = j;
+    bestSame = same;
   }
   return best;
 }
