@@ -1090,6 +1090,20 @@ bool same_piece(const DrawRecord& draw, const DrawRecord& other, const std::vect
   return true;
 }
 
+// How far two draws laid out alike are apart in their vertices' colours.
+uint32_t colour_difference(const DrawRecord& draw, const DrawRecord& other) {
+  const auto& layout = draw.vertices;
+  const uint8_t* a = g_cur.vertices.data() + draw.vertData + layout.colour;
+  const uint8_t* b = g_prev.vertices.data() + other.vertData + layout.colour;
+  uint32_t difference = 0;
+  for (uint32_t v = 0; layout.colourBytes != 0 && v < draw.vertBytes; v += layout.stride) {
+    for (uint32_t c = 0; c < layout.colourBytes; ++c) {
+      difference += static_cast<uint32_t>(std::abs(int{a[v + c]} - int{b[v + c]}));
+    }
+  }
+  return difference;
+}
+
 // The older draw for draw i of the newer frame, whose vertices are kept:
 // among the older draws with its key and as many vertices laid out alike, the
 // one centred closest to it (exact: only one centred where it is). The game
@@ -1110,6 +1124,11 @@ uint32_t pick_vertices(const SlotIndex& index, HashType key, const DrawRecord& d
   const float limit = exact ? 1e-4f * length2(target) + 1e-4f : INFINITY;
   float bestDistance = INFINITY;
   bool bestSame = false;
+  uint32_t bestTint = UINT32_MAX; // its colour_difference, once needed
+  // Some came or went since: a twin left behind may be any of them.
+  const auto count = g_curCounts.find(key);
+  const bool changed = &index != &g_byKey || count == g_curCounts.end() ||
+                       count->second != it->second.end - it->second.begin;
   for (uint32_t k = it->second.begin; k < it->second.end; ++k) {
     const uint32_t j = index.slots[k].index;
     const auto& other = g_prev.draws[j];
@@ -1131,12 +1150,31 @@ uint32_t pick_vertices(const SlotIndex& index, HashType key, const DrawRecord& d
       continue;
     }
     const bool same = screen && same_piece(draw, other, g_cur.vertices, g_prev.vertices);
-    if (same < bestSame || (same == bestSame && distance >= bestDistance)) {
+    if (same < bestSame) {
       continue;
+    }
+    // Two where it is, after some came or went (a screen's veil over an
+    // older one, faded out and gone next): the one coloured as it is first.
+    // The other would fade the veil in from nothing. Otherwise they keep
+    // their order: two fades over each other pass close in colour.
+    uint32_t tint = UINT32_MAX;
+    if (same == bestSame && best != NoMatch) {
+      if (exact && changed) {
+        tint = colour_difference(draw, other);
+        if (bestTint == UINT32_MAX) {
+          bestTint = colour_difference(draw, g_prev.draws[best]);
+        }
+        if (tint > bestTint || (tint == bestTint && distance >= bestDistance)) {
+          continue;
+        }
+      } else if (distance >= bestDistance) {
+        continue;
+      }
     }
     bestDistance = distance;
     best = j;
     bestSame = same;
+    bestTint = tint;
   }
   return best;
 }
