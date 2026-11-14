@@ -2454,6 +2454,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         camera = s_viewCamera;
       }
     }
+    Hasher shaper;
+    shaper.update(pipeline);
+    shaper.update(static_cast<u32>(vtxCount));
+    shaper.update(numIndices);
     Hasher hasher;
     hasher.update(pipeline);
     hasher.update(bindGroups.textureBindGroup);
@@ -2463,6 +2467,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     gfx::interp::record_draw({
         .key = static_cast<HashType>(hasher.digest()),
         .group = group,
+        .shape = static_cast<HashType>(shaper.digest()),
         .offset = layout.matrices,
         .current = s_vtxMatrices != 0 ? static_cast<u32>(std::countr_zero(s_vtxMatrices)) : g_gxState.currentPnMtx,
         .sources = g_gxState.pnMtxSource,

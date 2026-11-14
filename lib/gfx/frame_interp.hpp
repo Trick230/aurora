@@ -75,6 +75,7 @@ struct VertexLayout {
 struct DrawRecord {
   HashType key;   // pipeline, textures and sizes
   HashType group; // pipeline and textures, for draws whose sizes changed
+  HashType shape; // pipeline and sizes, for sprites whose texture is made again each frame
   uint32_t offset;  // the matrices of the draw's uniform block in the frame's uniform stream
   uint32_t current; // the position matrix placing it: the one vertices use without a matrix index, else the first they pick
   std::array<MatrixSources, MatrixSlots> sources;

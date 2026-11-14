@@ -432,6 +432,7 @@ struct SlotIndex {
 };
 SlotIndex g_byKey;
 SlotIndex g_byGroup;
+SlotIndex g_byShape;
 std::vector<uint8_t> g_used;
 // The older draw paired with each newer one.
 std::vector<uint32_t> g_pairs;
@@ -1096,10 +1097,12 @@ bool same_piece(const DrawRecord& draw, const DrawRecord& other, const std::vect
 // On screen, one showing the same piece goes first: a menu's sprites from one
 // sheet (a book and its number) close in as they grow would otherwise swap.
 // found says whether any such draw was there; if none, it pairs as others do.
-uint32_t pick_vertices(const DrawRecord& draw, size_t i, bool screen, bool exact, bool& found) {
+// (index and key: g_byKey and its key, or g_byShape and its shape.)
+uint32_t pick_vertices(const SlotIndex& index, HashType key, const DrawRecord& draw, size_t i, bool screen, bool exact,
+                       bool& found) {
   found = false;
-  const auto it = g_byKey.ranges.find(draw.key);
-  if (it == g_byKey.ranges.end()) {
+  const auto it = index.ranges.find(key);
+  if (it == index.ranges.end()) {
     return NoMatch;
   }
   const Vec3& target = g_curCentres[i];
@@ -1108,7 +1111,7 @@ uint32_t pick_vertices(const DrawRecord& draw, size_t i, bool screen, bool exact
   float bestDistance = INFINITY;
   bool bestSame = false;
   for (uint32_t k = it->second.begin; k < it->second.end; ++k) {
-    const uint32_t j = g_byKey.slots[k].index;
+    const uint32_t j = index.slots[k].index;
     const auto& other = g_prev.draws[j];
     if (other.vertBytes != draw.vertBytes || !(other.vertices == draw.vertices)) {
       continue;
@@ -1252,6 +1255,7 @@ void match() {
   g_unmatched.clear();
   build_index(g_byKey, prev, &DrawRecord::key);
   build_index(g_byGroup, prev, &DrawRecord::group);
+  build_index(g_byShape, prev, &DrawRecord::shape);
   build_identities(g_byKeyIdentity, prev);
   build_identities(g_byGroupIdentity, prev);
   g_used.assign(prev.size(), 0);
@@ -1278,8 +1282,9 @@ void match() {
       const float* mtx = current_matrix(curBase, draw);
       bool kept = false;
       uint32_t j = NoMatch;
+      const bool screen = curBase[draw.offset / 4 + 15] != 0.f;
       if (draw.vertBytes != 0) {
-        j = pick_vertices(draw, i, curBase[draw.offset / 4 + 15] != 0.f, exact, kept);
+        j = pick_vertices(g_byKey, draw.key, draw, i, screen, exact, kept);
         // Nothing left with its layout: the older pickers may still pair it.
         kept = kept && (exact || j != NoMatch);
       }
@@ -1294,6 +1299,13 @@ void match() {
       }
       if (!kept && j == NoMatch) {
         j = pick(g_byGroup, draw, draw.group, prevBase, mtx, exact);
+      }
+      // A sprite whose texture the game makes again each frame (a picture it
+      // redraws) has a new key each time: the older draw of the same piece,
+      // whatever its texture.
+      if (!kept && j == NoMatch && draw.vertBytes != 0 && screen) {
+        bool found = false;
+        j = pick_vertices(g_byShape, draw.shape, draw, i, screen, exact, found);
       }
       if (j != NoMatch) {
         g_used[j] = 1;
