@@ -89,6 +89,9 @@ struct DrawRecord {
   VertexLayout vertices{};
   uint32_t vertData = 0;
   uint32_t vertBytes = 0;
+  // The bytes of each of its separate pieces, when all are alike (0: none):
+  // a quad of a quad list, or each draw merged into it.
+  uint32_t piece = 0;
 };
 
 // Encodes the retained frame's passes again into the encoder.
@@ -118,7 +121,7 @@ void discard();
 void record_draw(const DrawRecord& record, std::span<const uint8_t> vertices);
 // Render thread, while recording: a draw merged into the last one recorded
 // adds the position matrices its vertices use, and its vertices.
-void merge_draw(uint16_t used, std::span<const uint8_t> vertices);
+void merge_draw(uint16_t used, std::span<const uint8_t> vertices, uint32_t piece);
 // Render thread, while recording: notes a camera of the frame, returning the
 // value for DrawRecord::camera.
 uint16_t record_camera(const ViewMatrix& view);

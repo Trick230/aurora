@@ -1045,7 +1045,8 @@ void find_trails() {
   g_pieceSizes.clear();
   for (const Frame* frame : {&g_cur, &g_prev}) {
     for (const auto& draw : frame->draws) {
-      if (!in_world(*frame, draw)) {
+      // A batch of pieces all alike (sparkles) pairs piece by piece.
+      if (!in_world(*frame, draw) || (draw.piece != 0 && draw.vertBytes != draw.piece)) {
         continue;
       }
       const auto [it, added] = g_pieceSizes.try_emplace(draw.group, draw.vertBytes);
@@ -1071,14 +1072,10 @@ void vertex_centres(std::vector<Vec3>& out, const Frame& frame) {
 // Whether two draws laid out alike carry the same vertices but for their
 // positions and colours: the same piece of a texture (a menu's sprites, all
 // from one sheet, differ only in where they read it).
-bool same_piece(const DrawRecord& draw, const DrawRecord& other, const std::vector<uint8_t>& curVertices,
-                const std::vector<uint8_t>& prevVertices) {
-  const auto& layout = draw.vertices;
+bool same_but_placed(const uint8_t* a, const uint8_t* b, uint32_t bytes, const VertexLayout& layout) {
   const uint32_t positionEnd = layout.position + layout.count * (layout.type == GX_F32 ? 4u : 2u);
   const uint32_t colourEnd = layout.colour + layout.colourBytes;
-  const uint8_t* a = curVertices.data() + draw.vertData;
-  const uint8_t* b = prevVertices.data() + other.vertData;
-  for (uint32_t v = 0; v < draw.vertBytes; v += layout.stride) {
+  for (uint32_t v = 0; v < bytes; v += layout.stride) {
     for (uint32_t k = 0; k < layout.stride; ++k) {
       const bool position = k >= layout.position && k < positionEnd;
       const bool colour = layout.colourBytes != 0 && k >= layout.colour && k < colourEnd;
@@ -1088,6 +1085,12 @@ bool same_piece(const DrawRecord& draw, const DrawRecord& other, const std::vect
     }
   }
   return true;
+}
+
+bool same_piece(const DrawRecord& draw, const DrawRecord& other, const std::vector<uint8_t>& curVertices,
+                const std::vector<uint8_t>& prevVertices) {
+  return same_but_placed(curVertices.data() + draw.vertData, prevVertices.data() + other.vertData, draw.vertBytes,
+                         draw.vertices);
 }
 
 // How far two draws laid out alike are apart in their vertices' colours.
@@ -1191,31 +1194,21 @@ bool project(const float* b, const Vec3& p, float& x, float& y) {
   return true;
 }
 
-// A draw placed on the CPU and its older pair: their positions and colours
-// blend when the vertices line up and each moved little on screen, in front
-// of the eye (b is the newer block, mtx its position matrix). budget is what
-// the replays' vertex uploads have left.
-void match_vertices(const DrawRecord& draw, const DrawRecord& other, const float* b, const float* mtx,
-                    uint32_t& budget) {
-  const auto& layout = draw.vertices;
-  const uint32_t size = AURORA_ALIGN(draw.vertBytes, 4);
-  if (other.vertBytes != draw.vertBytes || !(other.vertices == layout) || size > budget) {
-    return;
-  }
-  const uint8_t* cur = g_cur.vertices.data() + draw.vertData;
-  const uint8_t* prev = g_prev.vertices.data() + other.vertData;
-  if (std::memcmp(cur, prev, draw.vertBytes) == 0) {
-    return;
-  }
-  // The pair moves as one piece: each vertex moves as the whole does, give or
-  // take the draw's size (a particle turning). One whose triangles the game
-  // drew in another order (sorted by depth) would blend into shards.
+// Whether vertices cur and their older pair prev (bytes of each, laid out as
+// layout) move as one piece, each little on screen, in front of the eye (b is
+// the newer block, mtx its position matrix). moved: whether any position or
+// colour differs.
+bool moves_as_one(const uint8_t* cur, const uint8_t* prev, uint32_t bytes, const VertexLayout& layout, const float* b,
+                  const float* mtx, bool& moved) {
+  // Each vertex moves as the whole does, give or take its size (a particle
+  // turning). One whose triangles the game drew in another order (sorted by
+  // depth) would blend into shards.
   Vec3 shift{};
   Vec3 low{INFINITY, INFINITY, INFINITY};
   Vec3 high{-INFINITY, -INFINITY, -INFINITY};
   Vec3 prevLow = low;
   Vec3 prevHigh = high;
-  for (uint32_t v = 0; v < draw.vertBytes; v += layout.stride) {
+  for (uint32_t v = 0; v < bytes; v += layout.stride) {
     for (uint32_t c = 0; c < layout.count; ++c) {
       const float p = position_component(cur + v, layout, c);
       const float q = position_component(prev + v, layout, c);
@@ -1226,7 +1219,7 @@ void match_vertices(const DrawRecord& draw, const DrawRecord& other, const float
       prevHigh[c] = std::max(prevHigh[c], q);
     }
   }
-  const float vertexCount = static_cast<float>(draw.vertBytes / layout.stride);
+  const float vertexCount = static_cast<float>(bytes / layout.stride);
   for (uint32_t c = 0; c < 3; ++c) {
     shift[c] /= vertexCount;
     if (c >= layout.count) {
@@ -1236,8 +1229,8 @@ void match_vertices(const DrawRecord& draw, const DrawRecord& other, const float
   // Half the larger of the two frames' extents: a piece shrinking or growing
   // fast still blends.
   const float reach = 0.25f * std::max(distance2(high, low), distance2(prevHigh, prevLow)) + 1e-6f;
-  bool moved = false;
-  for (uint32_t v = 0; v < draw.vertBytes; v += layout.stride) {
+  moved = false;
+  for (uint32_t v = 0; v < bytes; v += layout.stride) {
     if (layout.colourBytes != 0 &&
         std::memcmp(cur + v + layout.colour, prev + v + layout.colour, layout.colourBytes) != 0) {
       moved = true;
@@ -1252,7 +1245,7 @@ void match_vertices(const DrawRecord& draw, const DrawRecord& other, const float
       off[c] = position_component(cur + v, layout, c) - position_component(prev + v, layout, c) - shift[c];
     }
     if (!(length2(off) <= reach)) {
-      return;
+      return false;
     }
     float x0;
     float y0;
@@ -1264,12 +1257,131 @@ void match_vertices(const DrawRecord& draw, const DrawRecord& other, const float
       continue; // behind the eye in both frames: never shown
     }
     if (seen0 != seen1 || !(std::abs(x1 - x0) <= MaxScreenMove && std::abs(y1 - y0) <= MaxScreenMove)) {
-      return;
+      return false;
     }
+  }
+  return true;
+}
+
+// A draw placed on the CPU and its older pair: their positions and colours
+// blend when the vertices line up and each moved little on screen, in front
+// of the eye (b is the newer block, mtx its position matrix). budget is what
+// the replays' vertex uploads have left. False if they don't line up.
+bool match_vertices(const DrawRecord& draw, const DrawRecord& other, const float* b, const float* mtx,
+                    uint32_t& budget) {
+  const auto& layout = draw.vertices;
+  const uint32_t size = AURORA_ALIGN(draw.vertBytes, 4);
+  if (other.vertBytes != draw.vertBytes || !(other.vertices == layout)) {
+    return false;
+  }
+  const uint8_t* cur = g_cur.vertices.data() + draw.vertData;
+  const uint8_t* prev = g_prev.vertices.data() + other.vertData;
+  if (std::memcmp(cur, prev, draw.vertBytes) == 0 || size > budget) {
+    return true;
+  }
+  bool moved = false;
+  if (!moves_as_one(cur, prev, draw.vertBytes, layout, b, mtx, moved)) {
+    return false;
   }
   if (moved) {
     g_vertexBlends.push_back({draw.vertData, other.vertData, draw.vertOffset, draw.vertBytes, layout});
     budget -= size;
+  }
+  return true;
+}
+
+// The centre of a piece's vertices, and half its extent, squared.
+void piece_bounds(const uint8_t* p, uint32_t bytes, const VertexLayout& layout, Vec3& centre, float& reach) {
+  Vec3 low{};
+  Vec3 high{};
+  for (uint32_t c = 0; c < layout.count; ++c) {
+    low[c] = INFINITY;
+    high[c] = -INFINITY;
+  }
+  for (uint32_t v = 0; v < bytes; v += layout.stride) {
+    for (uint32_t c = 0; c < layout.count; ++c) {
+      const float x = position_component(p + v, layout, c);
+      low[c] = std::min(low[c], x);
+      high[c] = std::max(high[c], x);
+    }
+  }
+  centre = {(low[0] + high[0]) * 0.5f, (low[1] + high[1]) * 0.5f, (low[2] + high[2]) * 0.5f};
+  reach = 0.25f * distance2(high, low) + 1e-6f;
+}
+
+std::vector<Vec3> g_pieceCentres;
+std::vector<uint8_t> g_pieceUsed;
+
+// A batch of GX draws the game merged into one, all alike in size (a door's
+// sparkles, a quad each), whose older pair doesn't line up as a whole: some
+// came or went since. Those left pair piece by piece, in the order the game
+// drew them where it still holds, else with the older piece centred closest
+// (the first of equals: a sparkle's rays share one centre). Each pair blends
+// as a draw would.
+void match_pieces(const DrawRecord& draw, const DrawRecord& other, const float* b, const float* mtx,
+                  uint32_t& budget) {
+  const auto& layout = draw.vertices;
+  const uint32_t piece = draw.piece;
+  if (piece == 0 || other.piece != piece || !(other.vertices == layout) || piece % 4 != 0 ||
+      (draw.vertBytes == piece && other.vertBytes == piece)) {
+    return;
+  }
+  const uint32_t count = draw.vertBytes / piece;
+  const uint32_t prevCount = other.vertBytes / piece;
+  const uint8_t* cur = g_cur.vertices.data() + draw.vertData;
+  const uint8_t* prev = g_prev.vertices.data() + other.vertData;
+  g_pieceCentres.resize(prevCount);
+  g_pieceUsed.assign(prevCount, 0);
+  for (uint32_t j = 0; j < prevCount; ++j) {
+    float reach;
+    piece_bounds(prev + j * piece, piece, layout, g_pieceCentres[j], reach);
+  }
+  uint32_t expected = 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint8_t* a = cur + i * piece;
+    Vec3 centre;
+    float reach;
+    piece_bounds(a, piece, layout, centre, reach);
+    const auto fits = [&](uint32_t j) {
+      return !g_pieceUsed[j] && distance2(centre, g_pieceCentres[j]) <= reach &&
+             same_but_placed(a, prev + j * piece, piece, layout);
+    };
+    uint32_t j = NoMatch;
+    if (expected < prevCount && fits(expected)) {
+      j = expected;
+    } else {
+      float best = INFINITY;
+      const float equal = 1e-4f * reach;
+      for (uint32_t k = 0; k < prevCount; ++k) {
+        const float distance = distance2(centre, g_pieceCentres[k]);
+        if (distance + equal < best && fits(k)) {
+          best = distance;
+          j = k;
+        }
+      }
+    }
+    if (j == NoMatch) {
+      continue;
+    }
+    g_pieceUsed[j] = 1;
+    expected = j + 1;
+    const uint8_t* p = prev + j * piece;
+    bool moved = false;
+    if (std::memcmp(a, p, piece) == 0 || piece > budget || !moves_as_one(a, p, piece, layout, b, mtx, moved) ||
+        !moved) {
+      continue;
+    }
+    const uint32_t curData = draw.vertData + i * piece;
+    const uint32_t prevData = other.vertData + j * piece;
+    const uint32_t gpu = draw.vertOffset + i * piece;
+    auto* last = g_vertexBlends.empty() ? nullptr : &g_vertexBlends.back();
+    if (last != nullptr && last->layout == layout && last->cur + last->bytes == curData && last->prev + last->bytes == prevData &&
+        last->gpu + last->bytes == gpu) {
+      last->bytes += piece; // the run goes on: one copy
+    } else {
+      g_vertexBlends.push_back({curData, prevData, gpu, piece, layout});
+    }
+    budget -= piece;
   }
 }
 
@@ -1367,8 +1479,9 @@ void match() {
     const auto& other = prev[j];
     // Its vertices blend whether or not its block does (a menu's draws share
     // one), and through camera cuts, which don't move the screen.
-    if (draw.vertBytes != 0 && std::ranges::find(g_trails, draw.group) == g_trails.end()) {
-      match_vertices(draw, other, curBase + draw.offset / 4, current_matrix(curBase, draw), vertexBudget);
+    if (draw.vertBytes != 0 && std::ranges::find(g_trails, draw.group) == g_trails.end() &&
+        !match_vertices(draw, other, curBase + draw.offset / 4, current_matrix(curBase, draw), vertexBudget)) {
+      match_pieces(draw, other, curBase + draw.offset / 4, current_matrix(curBase, draw), vertexBudget);
     }
     const uint16_t camera = camera_of(draw);
     use_camera(camera);

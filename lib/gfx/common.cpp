@@ -1131,7 +1131,7 @@ void interp::record_draw(const DrawRecord& record, std::span<const uint8_t> vert
   }
 }
 
-void interp::merge_draw(uint16_t used, std::span<const uint8_t> vertices) {
+void interp::merge_draw(uint16_t used, std::span<const uint8_t> vertices, uint32_t piece) {
   auto& packet = current_frame_packet();
   if (packet.interpDraws.empty()) {
     return;
@@ -1145,6 +1145,9 @@ void interp::merge_draw(uint16_t used, std::span<const uint8_t> vertices) {
     // Part of its vertices unkept: none are blended.
     draw.vertBytes = 0;
     return;
+  }
+  if (piece != draw.piece) {
+    draw.piece = 0;
   }
   draw.vertBytes += static_cast<uint32_t>(vertices.size());
   packet.interpVertices.insert(packet.interpVertices.end(), vertices.begin(), vertices.end());

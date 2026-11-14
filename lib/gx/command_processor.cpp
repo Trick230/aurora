@@ -36,6 +36,8 @@ static u16 s_vtxMatrices = 0;
 // interpolation can blend (stride 0: they don't).
 static std::span<const u8> s_vtxBytes;
 static gfx::interp::VertexLayout s_vtxLayout;
+// Its pieces' bytes: a quad's in a quad list, else all of them.
+static u32 s_vtxPiece;
 static constexpr u32 MaxDisplayListDepth = 16;
 
 // Triangle-list indices for a primitive's vertices, appended to buf. The
@@ -2205,6 +2207,7 @@ static void draw_vertices(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8
     }
     s_vtxLayout = interp_vertex_layout(fmt, vtxSize, bigEndian);
     s_vtxBytes = s_vtxLayout.stride != 0 ? std::span{vertices, totalVtxBytes} : std::span<const u8>{};
+    s_vtxPiece = prim == GX_QUADS ? 4 * vtxSize : totalVtxBytes;
   }
 
   // Merge into the previous draw when it was built from identical state,
@@ -2282,7 +2285,7 @@ static void draw_vertices(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8
     lastDraw->vtxCount += vtxCount;
     lastDraw->indexCount += numIndices;
     if (gfx::interp::enabled()) {
-      gfx::interp::merge_draw(s_vtxMatrices, s_vtxBytes);
+      gfx::interp::merge_draw(s_vtxMatrices, s_vtxBytes, s_vtxPiece);
     }
     ++gfx::g_mergedDrawCallCount;
     return;
@@ -2477,6 +2480,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         .used = s_vtxMatrices != 0 ? s_vtxMatrices : static_cast<u16>(1u << std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1)),
         .vertOffset = vertRange.offset,
         .vertices = s_vtxLayout,
+        .piece = s_vtxPiece,
     }, s_vtxBytes);
   }
   if (drawn != pipeline) {
