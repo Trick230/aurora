@@ -1114,9 +1114,11 @@ uint32_t colour_difference(const DrawRecord& draw, const DrawRecord& other) {
 // On screen, one showing the same piece goes first: a menu's sprites from one
 // sheet (a book and its number) close in as they grow would otherwise swap.
 // found says whether any such draw was there; if none, it pairs as others do.
-// (index and key: g_byKey and its key, or g_byShape and its shape.)
+// (index and key: g_byKey and its key, or g_byShape and its shape; or, with
+// batch, g_byGroup and its group: a batch of like pieces taking any older
+// batch of such pieces, whatever their count.)
 uint32_t pick_vertices(const SlotIndex& index, HashType key, const DrawRecord& draw, size_t i, bool screen, bool exact,
-                       bool& found) {
+                       bool& found, bool batch = false) {
   found = false;
   const auto it = index.ranges.find(key);
   if (it == index.ranges.end()) {
@@ -1135,7 +1137,8 @@ uint32_t pick_vertices(const SlotIndex& index, HashType key, const DrawRecord& d
   for (uint32_t k = it->second.begin; k < it->second.end; ++k) {
     const uint32_t j = index.slots[k].index;
     const auto& other = g_prev.draws[j];
-    if (other.vertBytes != draw.vertBytes || !(other.vertices == draw.vertices)) {
+    if ((batch ? other.piece != draw.piece || other.vertBytes == 0 : other.vertBytes != draw.vertBytes) ||
+        !(other.vertices == draw.vertices)) {
       continue;
     }
     found = true;
@@ -1434,7 +1437,12 @@ void match() {
       uint32_t j = NoMatch;
       const bool screen = curBase[draw.offset / 4 + 15] != 0.f;
       if (draw.vertBytes != 0) {
-        j = pick_vertices(g_byKey, draw.key, draw, i, screen, exact, kept);
+        // A batch of like pieces (an orb's rays) keys its count, which comes
+        // and goes: two orbs trading counts would trade places. It takes the
+        // nearest older batch of such pieces, whatever their count.
+        const bool batch = draw.piece != 0 && draw.vertBytes != draw.piece;
+        j = batch ? pick_vertices(g_byGroup, draw.group, draw, i, screen, exact, kept, true)
+                  : pick_vertices(g_byKey, draw.key, draw, i, screen, exact, kept);
         // Nothing left with its layout: the older pickers may still pair it.
         kept = kept && (exact || j != NoMatch);
       }
@@ -1479,8 +1487,12 @@ void match() {
     const auto& other = prev[j];
     // Its vertices blend whether or not its block does (a menu's draws share
     // one), and through camera cuts, which don't move the screen.
+    // A batch of pieces always pairs piece by piece: as a whole, a piece
+    // shifting into its neighbour's place (one died, one was born) still
+    // looks like a small move of the batch.
     if (draw.vertBytes != 0 && std::ranges::find(g_trails, draw.group) == g_trails.end() &&
-        !match_vertices(draw, other, curBase + draw.offset / 4, current_matrix(curBase, draw), vertexBudget)) {
+        ((draw.piece != 0 && (draw.vertBytes != draw.piece || other.vertBytes != draw.piece)) ||
+         !match_vertices(draw, other, curBase + draw.offset / 4, current_matrix(curBase, draw), vertexBudget))) {
       match_pieces(draw, other, curBase + draw.offset / 4, current_matrix(curBase, draw), vertexBudget);
     }
     const uint16_t camera = camera_of(draw);
