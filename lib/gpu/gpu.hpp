@@ -15,7 +15,12 @@ struct SDL_Window;
 
 namespace aurora::gpu {
 struct GraphicsConfig {
-  rhi::Format surfaceFormat;
+  rhi::Format surfaceFormat; // swapchain
+  // EFB, copies and everything drawn before the present: 10-bit colour keeps
+  // the game's half-intensity rendering (doubled at the end) free of banding.
+  // Alpha has 2 bits: NiGHTS never selects GX_PF_RGBA6_Z24, so EFB alpha
+  // reads as 1.
+  rhi::Format efbFormat;
   uint32_t surfaceWidth;
   uint32_t surfaceHeight;
   rhi::PresentMode presentMode;
@@ -23,6 +28,21 @@ struct GraphicsConfig {
   uint32_t msaaSamples;
   uint16_t textureAnisotropy;
 };
+// One readback pixel of a colour target as 8-bit RGB.
+inline void readback_rgb8(rhi::Format format, const uint8_t* in, uint8_t* out) noexcept {
+  if (format == rhi::Format::RGB10A2Unorm) {
+    const uint32_t v = uint32_t{in[0]} | uint32_t{in[1]} << 8 | uint32_t{in[2]} << 16 | uint32_t{in[3]} << 24;
+    for (int c = 0; c < 3; ++c) {
+      out[c] = static_cast<uint8_t>(((v >> (10 * c) & 0x3ff) * 255 + 511) / 1023);
+    }
+    return;
+  }
+  const bool bgra = format == rhi::Format::BGRA8Unorm || format == rhi::Format::BGRA8Srgb;
+  out[0] = in[bgra ? 2 : 0];
+  out[1] = in[1];
+  out[2] = in[bgra ? 0 : 2];
+}
+
 struct Extent {
   uint32_t width = 0;
   uint32_t height = 0;

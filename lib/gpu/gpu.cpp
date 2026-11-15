@@ -153,7 +153,8 @@ std::shared_ptr<rhi::Sampler> create_clamped_sampler() {
   return g_device->create_sampler(desc);
 }
 
-std::unique_ptr<rhi::RenderPipeline> create_present_pipeline(rhi::PipelineLayout* layout, const char* shader) {
+std::unique_ptr<rhi::RenderPipeline> create_present_pipeline(rhi::PipelineLayout* layout, const char* shader,
+                                                             rhi::Format format) {
   const std::string source = std::string{FullscreenVertex} + shader;
   const auto vertex = compile_shader(rhi::ShaderStage::Vertex, source, "vs_main");
   const auto fragment = compile_shader(rhi::ShaderStage::Fragment, source, "fs_main");
@@ -163,7 +164,7 @@ std::unique_ptr<rhi::RenderPipeline> create_present_pipeline(rhi::PipelineLayout
   desc.vertex_entry = "vs_main";
   desc.fragment = &fragment;
   desc.fragment_entry = "fs_main";
-  desc.color_format = g_graphicsConfig.surfaceFormat;
+  desc.color_format = format;
   return g_device->create_render_pipeline(desc);
 }
 
@@ -175,7 +176,7 @@ void create_copy_pipeline() {
   g_CopyBindGroupLayout = g_device->create_bind_group_layout({entries.data(), entries.size()});
   rhi::BindGroupLayout* groups[] = {g_CopyBindGroupLayout.get()};
   g_CopyPipelineLayout = g_device->create_pipeline_layout({groups, 1});
-  s_CopyPipeline = create_present_pipeline(g_CopyPipelineLayout.get(), CopyShader);
+  s_CopyPipeline = create_present_pipeline(g_CopyPipelineLayout.get(), CopyShader, g_graphicsConfig.surfaceFormat);
   g_CopyPipeline = s_CopyPipeline.get();
 }
 
@@ -190,7 +191,8 @@ void create_resample_pipeline() {
   g_ResampleBindGroupLayout = g_device->create_bind_group_layout({entries.data(), entries.size()});
   rhi::BindGroupLayout* groups[] = {g_ResampleBindGroupLayout.get()};
   g_ResamplePipelineLayout = g_device->create_pipeline_layout({groups, 1});
-  g_ResamplePipeline = create_present_pipeline(g_ResamplePipelineLayout.get(), ResampleShader);
+  g_ResamplePipeline = create_present_pipeline(g_ResamplePipelineLayout.get(), ResampleShader,
+                                               g_graphicsConfig.efbFormat);
   g_ResampleUniformBuffer =
       g_device->create_buffer({ResampleUniformStride * ResampleUniformSlots, rhi::MemoryKind::Upload});
 }
@@ -213,7 +215,7 @@ TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool m
   if (width == 0 || height == 0) {
     Log.fatal("Invalid render texture size! {}x{}, multisampled {}", width, height, multisampled);
   }
-  const auto format = g_graphicsConfig.surfaceFormat;
+  const auto format = g_graphicsConfig.efbFormat;
   auto texture = std::shared_ptr<rhi::Texture>{g_device->create_texture(
       {width, height, 1, multisampled ? g_graphicsConfig.msaaSamples : 1, format,
        rhi::TextureSampled | rhi::TextureColorTarget})};
@@ -376,6 +378,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   const auto size = window::get_window_size();
   g_graphicsConfig = GraphicsConfig{
       .surfaceFormat = rhi::Format::BGRA8Unorm,
+      .efbFormat = rhi::Format::RGB10A2Unorm,
       .surfaceWidth = size.native_fb_width,
       .surfaceHeight = size.native_fb_height,
       .presentMode = best_present_mode(g_config.vsync),

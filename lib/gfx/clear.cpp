@@ -37,7 +37,7 @@ std::shared_ptr<rhi::RenderPipeline> create_pipeline(const PipelineConfig& confi
   desc.vertex_entry = "vs_main";
   desc.fragment = &fragment;
   desc.fragment_entry = "fs_main";
-  desc.color_format = g_graphicsConfig.surfaceFormat;
+  desc.color_format = g_graphicsConfig.efbFormat;
   desc.color_write = (config.clearColor ? rhi::WriteR | rhi::WriteG | rhi::WriteB : 0) | (config.clearAlpha ? rhi::WriteA : 0);
   desc.blend = true;
   desc.blend_color = {rhi::BlendFactor::Constant, rhi::BlendFactor::Zero, rhi::BlendOp::Add};

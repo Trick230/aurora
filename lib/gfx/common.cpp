@@ -1088,7 +1088,7 @@ static void render(rhi::CommandList& list, FramePacket& frame, RenderPass& passI
                               dstSize.height != static_cast<uint32_t>(passInfo.resolveRect.height);
     const bool isDepth = gx::is_depth_format(passInfo.resolveFormat);
     // A plain copy only where the target matches the EFB and keeps its alpha.
-    const bool sameFormat = passInfo.resolveTarget->format == gpu::g_graphicsConfig.surfaceFormat;
+    const bool sameFormat = passInfo.resolveTarget->format == gpu::g_graphicsConfig.efbFormat;
     const tex_copy_conv::ConvRequest convReq{
         .fmt = passInfo.resolveFormat,
         .srcView = isDepth ? passInfo.copySourceDepthView : passInfo.copySourceView,

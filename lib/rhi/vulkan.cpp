@@ -28,6 +28,7 @@ VkFormat to_vk(Format format) {
   case Format::RGBA8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
   case Format::BGRA8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
   case Format::BGRA8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
+  case Format::RGB10A2Unorm: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
   case Format::R16Sint: return VK_FORMAT_R16_SINT;
   case Format::R32Float: return VK_FORMAT_R32_SFLOAT;
   case Format::Depth32Float: return VK_FORMAT_D32_SFLOAT;

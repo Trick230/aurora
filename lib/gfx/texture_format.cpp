@@ -23,6 +23,7 @@ TextureFormatInfo format_info(rhi::Format format) noexcept {
     return {1, 1, 2, false};
   case rhi::Format::RGBA8Unorm:
   case rhi::Format::BGRA8Unorm:
+  case rhi::Format::RGB10A2Unorm:
   case rhi::Format::R32Float:
     return {1, 1, 4, false};
   case rhi::Format::BC1:

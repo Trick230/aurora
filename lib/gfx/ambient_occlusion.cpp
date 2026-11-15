@@ -475,7 +475,7 @@ Pipeline create(rhi::PipelineLayout* layout, const std::string& source, rhi::For
 rhi::RenderPipeline& apply_pipeline(uint32_t samples, bool multisampledDepth) {
   auto& pipeline = g_applyPipelines[sample_index(samples) * 2 + multisampledDepth];
   if (!pipeline) {
-    pipeline = create(g_colorLayout.get(), apply_source(multisampledDepth), gpu::g_graphicsConfig.surfaceFormat,
+    pipeline = create(g_colorLayout.get(), apply_source(multisampledDepth), gpu::g_graphicsConfig.efbFormat,
                       samples, true);
   }
   return *pipeline;

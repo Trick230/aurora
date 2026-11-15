@@ -353,9 +353,10 @@ void initialize() {
   g_depthPipelineLayout = g_device->create_pipeline_layout({depthGroups, 1});
 
   g_blitPipeline =
-      create_pipeline(FragPassthrough, gpu::g_graphicsConfig.surfaceFormat, ShaderPreamble, g_pipelineLayout.get());
+      create_pipeline(FragPassthrough, gpu::g_graphicsConfig.efbFormat, ShaderPreamble, g_pipelineLayout.get());
   for (const auto& conv : ConvPipelines) {
-    g_pipelines[conv.fmt] = create_pipeline(conv.fragShader, to_rhi(conv.fmt), ShaderPreamble, g_pipelineLayout.get());
+    g_pipelines[conv.fmt] =
+        create_pipeline(conv.fragShader, conv_target_format(conv.fmt), ShaderPreamble, g_pipelineLayout.get());
   }
   const std::string depthPreamble = depth_preamble(false);
   const std::string msPreamble = depth_preamble(true);

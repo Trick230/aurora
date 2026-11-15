@@ -32,6 +32,7 @@ DXGI_FORMAT to_dxgi(Format format) {
   case Format::RGBA8Srgb: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
   case Format::BGRA8Unorm: return DXGI_FORMAT_B8G8R8A8_UNORM;
   case Format::BGRA8Srgb: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+  case Format::RGB10A2Unorm: return DXGI_FORMAT_R10G10B10A2_UNORM;
   case Format::R16Sint: return DXGI_FORMAT_R16_SINT;
   case Format::R32Float: return DXGI_FORMAT_R32_FLOAT;
   case Format::Depth32Float: return DXGI_FORMAT_D32_FLOAT;
@@ -1132,7 +1133,7 @@ std::unique_ptr<Device> create_d3d12_device(const DeviceOptions& options, std::s
   // What both a color and a depth target support, among the counts the API has.
   for (UINT samples : {2u, 4u, 8u}) {
     bool supported = true;
-    for (DXGI_FORMAT format : {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_D32_FLOAT}) {
+    for (DXGI_FORMAT format : {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_D32_FLOAT}) {
       D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS levels{};
       levels.Format = format;
       levels.SampleCount = samples;

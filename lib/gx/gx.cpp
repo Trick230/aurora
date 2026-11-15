@@ -636,7 +636,7 @@ std::shared_ptr<rhi::RenderPipeline> build_pipeline(const PipelineConfig& config
   desc.vertex_entry = "vs_main";
   desc.fragment = &fragment;
   desc.fragment_entry = "fs_main";
-  desc.color_format = g_graphicsConfig.surfaceFormat;
+  desc.color_format = g_graphicsConfig.efbFormat;
   desc.color_write = (config.colorUpdate ? rhi::WriteR | rhi::WriteG | rhi::WriteB : 0) | (config.alphaUpdate ? rhi::WriteA : 0);
   desc.blend = true;
   desc.blend_color = blend.color;
@@ -753,6 +753,15 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       .alphaUpdate = g_gxState.alphaUpdate,
       .colorUpdate = g_gxState.colorUpdate,
   };
+  if (!efb_has_alpha(g_gxState.pixelFmt)) {
+    // An EFB without alpha reads destination alpha as 1 (the target's own
+    // alpha has only 2 bits).
+    const auto opaque = [](GXBlendFactor factor) {
+      return factor == GX_BL_DSTALPHA ? GX_BL_ONE : factor == GX_BL_INVDSTALPHA ? GX_BL_ZERO : factor;
+    };
+    config.blendFacSrc = opaque(config.blendFacSrc);
+    config.blendFacDst = opaque(config.blendFacDst);
+  }
   // The coverage alpha would replace the fragment's alpha in an EFB that keeps it.
   const bool efbAlpha = g_gxState.alphaUpdate && g_gxState.pixelFmt == GX_PF_RGBA6_Z24;
   config.shaderConfig.alphaToCoverage = g_config.alphaToCoverage && config.msaaSamples > 1 && g_gxState.blendMode == GX_BM_NONE && !efbAlpha &&

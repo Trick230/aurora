@@ -1896,7 +1896,6 @@ void capture(float t, const char* name) {
   replay.ticket = g_device->submit(*replay.list);
   g_device->wait(replay.ticket);
   const auto* pixels = static_cast<const uint8_t*>(buffer->mapped());
-  const bool bgra = source.format == rhi::Format::BGRA8Unorm || source.format == rhi::Format::BGRA8Srgb;
   char path[512];
   std::snprintf(path, sizeof(path), "%s/%s.ppm", dir, name);
   if (FILE* file = std::fopen(path, "wb")) {
@@ -1905,9 +1904,7 @@ void capture(float t, const char* name) {
     for (uint32_t y = 0; y < height; ++y) {
       const uint8_t* in = pixels + size_t{row} * y;
       for (uint32_t x = 0; x < width; ++x) {
-        line[x * 3 + 0] = in[x * 4 + (bgra ? 2 : 0)];
-        line[x * 3 + 1] = in[x * 4 + 1];
-        line[x * 3 + 2] = in[x * 4 + (bgra ? 0 : 2)];
+        gpu::readback_rgb8(source.format, in + x * 4, &line[x * 3]);
       }
       std::fwrite(line.data(), 1, line.size(), file);
     }

@@ -110,12 +110,18 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
 
 TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
   (void)label;
-  return new_target(width, height, gpu::g_graphicsConfig.surfaceFormat, gxFormat);
+  return new_target(width, height, gpu::g_graphicsConfig.efbFormat, gxFormat);
 }
 
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
   (void)label;
-  return new_target(width, height, to_rhi(gxFormat), gxFormat);
+  return new_target(width, height, conv_target_format(gxFormat), gxFormat);
+}
+
+rhi::Format conv_target_format(u32 gxFormat) noexcept {
+  // RGB565 copies (bloom) keep the EFB's precision: the conversion doesn't
+  // quantize. The other conversions are exact 4/8-bit values.
+  return gxFormat == GX_TF_RGB565 ? gpu::g_graphicsConfig.efbFormat : to_rhi(gxFormat);
 }
 
 void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {

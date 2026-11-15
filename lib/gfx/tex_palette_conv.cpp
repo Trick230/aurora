@@ -49,7 +49,7 @@ float4 fs_main(VertexOutput input) : SV_Target {
     src.GetDimensions(width, height);
     int2 coord = int2(floor(input.uv * float2(width, height)));
     float r = src.Load(int3(coord, 0)).r;
-    return tlut.Load(int3(int(r * 255.0), 0, 0));
+    return tlut.Load(int3(int(r * 255.0 + 0.5), 0, 0));
 }
 )"sv;
 

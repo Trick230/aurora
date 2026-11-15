@@ -51,14 +51,14 @@ const char* frame_dump_dir() noexcept {
 struct FrameDump {
   std::unique_ptr<rhi::Buffer> buffer;
   uint32_t width = 0, height = 0, row = 0;
-  bool bgra = false;
+  rhi::Format format = rhi::Format::Undefined;
 };
 
 FrameDump frame_dump_copy(rhi::CommandList& list) {
   const auto& source = gpu::present_source();
   FrameDump dump{.width = source.size.width, .height = source.size.height};
   dump.row = AURORA_ALIGN(dump.width * 4, 256);
-  dump.bgra = source.format == rhi::Format::BGRA8Unorm;
+  dump.format = source.format;
   dump.buffer = g_device->create_buffer({uint64_t{dump.row} * dump.height, rhi::MemoryKind::Readback});
   list.copy_texture_to_buffer(*source.texture, {}, *dump.buffer, 0, dump.row);
   return dump;
@@ -72,9 +72,7 @@ void frame_dump_write(const FrameDump& dump) {
     const uint8_t* from = mapped + size_t{y} * dump.row;
     uint8_t* to = pixels.data() + size_t{y} * dump.width * 4;
     for (uint32_t x = 0; x < dump.width; ++x, from += 4, to += 4) {
-      to[0] = from[dump.bgra ? 2 : 0];
-      to[1] = from[1];
-      to[2] = from[dump.bgra ? 0 : 2];
+      gpu::readback_rgb8(dump.format, from, to);
       to[3] = 255; // never shown, and a few pixels of it vary between runs
     }
   }
