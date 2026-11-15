@@ -356,6 +356,12 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     info.uniformSize += MaxIndTexMtxs * sizeof(Mat2x4<float>);
   }
   info.uniformSize += info.sampledTextures.count() * sizeof(Vec4<float>);
+  // The flipbook fade (gfx/frame_interp.cpp) only where it fits.
+  constexpr u32 FlipSize = sizeof(Mat3x4<float>) + sizeof(Vec4<float>);
+  if (info.usesPTTexMtx.any() && config.lineMode == 0 && info.uniformSize + FlipSize <= MaxUniformSize) {
+    info.postFlip = true;
+    info.uniformSize += FlipSize;
+  }
   if (info.uniformSize > MaxUniformSize) {
     Log.fatal("Uniform size exceeds maximum: {} > {}", info.uniformSize, MaxUniformSize);
   }
@@ -463,8 +469,8 @@ u32 fog_range_base() noexcept {
 
 // A level frame issues thousands of draws whose blocks mostly repeat; share
 // them within the frame instead of filling the fixed uniform budget.
-gfx::Range push_block(const ByteBuffer& buf, u32 matrices, u32 lights, u32 post,
-                      gfx::interp::BlockLayout* layout) noexcept {
+gfx::Range push_block(const ByteBuffer& buf, u32 matrices, u32 lights, u32 post, u32 flip,
+                      u32 flipUses, gfx::interp::BlockLayout* layout) noexcept {
   static absl::flat_hash_map<HashType, gfx::Range> pushed;
   static u32 pushedFrame = UINT32_MAX;
   if (pushedFrame != gfx::current_frame()) {
@@ -479,6 +485,8 @@ gfx::Range push_block(const ByteBuffer& buf, u32 matrices, u32 lights, u32 post,
       .matrices = it->second.offset + matrices,
       .lights = static_cast<uint16_t>(lights),
       .post = static_cast<uint16_t>(post),
+      .flip = static_cast<uint16_t>(flip),
+      .flipUses = flipUses,
   };
   return it->second;
 }
@@ -582,6 +590,11 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
     for (int i = 0; i < info.usesPTTexMtx.size(); ++i) {
       buf.append(g_gxState.ptTexMtxs[i]);
     }
+    if (info.postFlip) {
+      // The flipbook fade's older matrix and weight, which only a replay sets.
+      buf.append(Mat3x4<float>{});
+      buf.append(Vec4<float>{0.f, 0.f, 0.f, 0.f});
+    }
   }
   if (info.usesFog) {
     const auto& state = g_gxState.fog;
@@ -608,7 +621,9 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
     buf.append(texture_size_bias(tex));
   }
   g_gxState.stateDirty = false;
-  return push_block(buf, matrices, lights, post, layout);
+  const bool flip = post != 0 && info.postFlip;
+  return push_block(buf, matrices, lights, post, flip ? post + MaxPTTexMtx * sizeof(Mat3x4<float>) / 4 : 0,
+                    flip ? static_cast<u32>(info.usesPTTexMtx.to_ulong()) : 0, layout);
 }
 
 gfx::Range build_uber_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges, u32 configBase,
@@ -675,7 +690,7 @@ gfx::Range build_uber_uniform(const ShaderInfo& info, u32 vtxStart, const BindGr
   }
   CHECK(buf.size() == MaxUniformSize, "ubershader block is {} bytes", buf.size());
   g_gxState.stateDirty = false;
-  return push_block(buf, matrices, lights, post, layout);
+  return push_block(buf, matrices, lights, post, 0, 0, layout);
 }
 bool uses_texture_sample(const TevStage& stage) noexcept {
   const auto& c = stage.colorPass;

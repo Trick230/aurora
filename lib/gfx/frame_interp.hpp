@@ -45,11 +45,14 @@ constexpr uint32_t MatrixSlots = 10;
 // (bytes), then its lights and post-transform texture matrices in floats
 // from there (0 for none). Lights are in eye space, and the post matrices
 // often take eye-space input (projected shadows), so both move with the
-// camera.
+// camera. After the post matrices, a flipbook fade: an older post matrix and
+// its weight (0 for none: the ubershader's block has no room for one).
 struct BlockLayout {
   uint32_t matrices = 0;
   uint16_t lights = 0;
   uint16_t post = 0;
+  uint16_t flip = 0;
+  uint32_t flipUses = 0;  // bit n: the shader reads post matrix n
 };
 
 // A view matrix, row-major 3x4 like GX position matrices: the world to eye
@@ -81,6 +84,8 @@ struct DrawRecord {
   std::array<MatrixSources, MatrixSlots> sources;
   uint16_t lights;  // as in BlockLayout
   uint16_t post;
+  uint16_t flip;
+  uint32_t flipUses;
   uint16_t camera;  // 1 + the frame's camera the draw's matrices were built with, 0 if unknown
   uint16_t used;    // bit n: its vertices use position matrix n
   // With vertices.stride set: where its vertices are in the vertex buffer,

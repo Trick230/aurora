@@ -2476,6 +2476,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         .sources = g_gxState.pnMtxSource,
         .lights = layout.lights,
         .post = layout.post,
+        .flip = layout.flip,
+        .flipUses = layout.flipUses,
         .camera = camera,
         .used = s_vtxMatrices != 0 ? s_vtxMatrices : static_cast<u16>(1u << std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1)),
         .vertOffset = vertRange.offset,

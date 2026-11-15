@@ -54,6 +54,7 @@ constexpr uint32_t BlendBytes = BlendFloats * 4;
 static_assert(PosMtx == 16 && TexMtx == 136 && NrmMtx == 256 && BlendFloats == 376);
 constexpr uint32_t MtxFloats = sizeof(Mat3x4<float>) / 4;
 constexpr float MaxTexDelta = 0.25f;
+constexpr float FlipEpsilon = 1e-4f;
 // Further on, a block may hold lights (each a position, a direction, a color
 // and attenuations) and the post-transform texture matrices.
 constexpr uint32_t LightFloats = sizeof(gx::Light) / 4;
@@ -118,7 +119,14 @@ struct Blend {
   uint8_t lightWorld = 0;
   uint32_t postBlend = 0;
   uint32_t postWorld = 0;
+  // Where the block's flipbook fade is (0: none), and the post matrix that
+  // steps from cell to cell of an atlas, faded across (NoFlip: none).
+  uint16_t flip = 0;
+  uint8_t flipSlot = 0xFF;
+  uint32_t flipUses = 0;  // the post matrices its shader reads
 };
+constexpr uint8_t NoFlip = 0xFF;
+constexpr uint32_t FlipFloats = MtxFloats + 4;
 
 constexpr uint32_t FirstNrm = 1 + gx::MaxPnMtx + gx::MaxTexMtx;
 
@@ -218,6 +226,34 @@ constexpr uint32_t NoMatch = UINT32_MAX;
 bool wraps(const float* a, const float* b) {
   return !(std::abs(b[3] - a[3]) < MaxTexDelta && std::abs(b[7] - a[7]) < MaxTexDelta &&
            std::abs(b[11] - a[11]) < MaxTexDelta);
+}
+
+// Whether post matrix a to b steps a flipbook: the same scale and rotation,
+// its offset moved from one cell of an atlas to another. Cells sit on a grid
+// (the texture coordinates often span one cell, the matrix then only picks
+// it), so both offsets are whole cells; a scroll's are anywhere, and an
+// offset moved by whole textures (a wrap) shows the same picture.
+bool on_grid(float offset) {
+  constexpr float Cells = 16.f;
+  return std::abs(offset * Cells - std::round(offset * Cells)) <= Cells * FlipEpsilon;
+}
+bool flip_step(const float* a, const float* b) {
+  for (int c = 0; c < 12; ++c) {
+    if (c != 3 && c != 7 && std::abs(b[c] - a[c]) > FlipEpsilon) {
+      return false;
+    }
+  }
+  bool cell = false;
+  for (int r = 0; r < 2; ++r) {
+    const float oa = a[r * 4 + 3];
+    const float ob = b[r * 4 + 3];
+    if (!on_grid(oa) || !on_grid(ob)) {
+      return false;
+    }
+    const float d = ob - oa;
+    cell |= std::abs(d - std::round(d)) > FlipEpsilon;
+  }
+  return cell;
 }
 
 // Affine 3x4 matrices, row-major like GX position matrices.
@@ -721,7 +757,12 @@ void select_extras(Blend& item, const float* a, const float* b) {
         }
         world = dw < de;
       }
-      if (!wraps(world ? moved.data() : pa, pb)) {
+      if (flip_step(pa, pb)) {
+        // A cell steps: faded where the block has room, else authentic.
+        if (item.flipSlot == NoFlip && (item.flipUses >> i & 1) != 0) {
+          item.flipSlot = static_cast<uint8_t>(i);
+        }
+      } else if (!wraps(world ? moved.data() : pa, pb)) {
         item.postBlend |= 1u << i;
         item.postWorld |= static_cast<uint32_t>(world) << i;
       }
@@ -1508,11 +1549,15 @@ void match() {
     Blend item{draw.offset / 4, other.offset / 4, 0, {}};
     item.camera = camera;
     if (other.lights == draw.lights && other.post == draw.post) {
+      const bool flip = draw.flip != 0 && other.flip == draw.flip && other.flipUses == draw.flipUses;
       const uint32_t extent = std::max({BlendFloats, draw.lights != 0 ? draw.lights + LightsFloats : 0u,
-                                        draw.post != 0 ? draw.post + PostFloats : 0u});
+                                        draw.post != 0 ? draw.post + PostFloats : 0u,
+                                        flip ? draw.flip + FlipFloats : 0u});
       if (draw.offset + extent * 4 <= curSize && other.offset + extent * 4 <= prevSize) {
         item.lights = draw.lights;
         item.post = draw.post;
+        item.flip = flip ? draw.flip : 0;
+        item.flipUses = flip ? draw.flipUses : 0;
         item.extent = extent;
       }
     }
@@ -1595,7 +1640,7 @@ void match() {
       }
     }
     select_extras(item, a, b);
-    if (item.matrices == 0 && item.lightBlend == 0 && item.postBlend == 0) {
+    if (item.matrices == 0 && item.lightBlend == 0 && item.postBlend == 0 && item.flipSlot == NoFlip) {
       continue;
     }
     store_older(item, a);
@@ -1733,6 +1778,13 @@ void blend(float t, rhi::CommandList& list, rhi::Buffer& upload) {
         m = compose(m.data(), backInverse.data());
       }
       std::memcpy(out + start, m.data(), sizeof(m));
+    }
+    if (item.flipSlot != NoFlip) {
+      // The newer cell's matrix stays; the older one fades out over the replay.
+      float* fade = out + item.flip;
+      std::memcpy(fade, a + item.post + item.flipSlot * MtxFloats, MtxFloats * 4);
+      fade[MtxFloats] = t >= 1.f ? 0.f : 1.f - t;
+      fade[MtxFloats + 1] = static_cast<float>(item.flipSlot);
     }
   }
   if (!g_uploaded) {

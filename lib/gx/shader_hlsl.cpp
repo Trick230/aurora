@@ -1118,6 +1118,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
       uniBufAttrs += fmt::format("\n    float4 kcolor{};", i);
     }
   }
+  // Per texcoord: the post matrix it fades as a flipbook through, 0xFF none.
+  std::array<u8, MaxTexCoord> flipTexCoords;
+  flipTexCoords.fill(0xFF);
   for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
     if (!info.sampledTexCoords.test(i)) {
       continue;
@@ -1185,6 +1188,22 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
       u32 postMtxIdx = (tcg.postMtx - GX_PTTEXMTX0) / 3;
       vtxXfrAttrs +=
           fmt::format("\n    float3 tc{0}_proj = mul(vec4f(tc{0}_tmp.xyz, 1.0), ubuf.postmtx[{1}]);", i, postMtxIdx);
+      // A flipbook (its post matrix steps from cell to cell of an atlas)
+      // fades between the older cell and the newer one under interpolation:
+      // the coordinate through the older matrix too (gfx/frame_interp.cpp).
+      if (info.postFlip) {
+        flipTexCoords[i] = static_cast<u8>(postMtxIdx);
+        if (tcg.type == GX_TG_MTX3x4) {
+          vtxOutAttrs += fmt::format("\n    centroid float3 tex{1}_flip : TEXCOORD{0};", vtxOutIdx++, i);
+          vtxXfrAttrs += fmt::format("\n    output.tex{0}_flip = mul(vec4f(tc{0}_tmp.xyz, 1.0), ubuf.post_flip_mtx);", i);
+          fragmentFnPre += fmt::format("\n    float2 tex{0}_flip_uv = input.tex{0}_flip.xy / input.tex{0}_flip.z;", i);
+        } else {
+          vtxOutAttrs += fmt::format("\n    centroid float2 tex{1}_flip : TEXCOORD{0};", vtxOutIdx++, i);
+          vtxXfrAttrs +=
+              fmt::format("\n    output.tex{0}_flip = mul(vec4f(tc{0}_tmp.xyz, 1.0), ubuf.post_flip_mtx).xy;", i);
+          fragmentFnPre += fmt::format("\n    float2 tex{0}_flip_uv = input.tex{0}_flip.xy;", i);
+        }
+      }
     }
     // Apply line/point tex offset
     if (config.lineMode == 3) {
@@ -1431,6 +1450,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
       continue;
     }
     CHECK(stage.texCoordId != GX_TEXCOORD_NULL, "unmapped texcoord for stage {}", i);
+    const bool flips = uvIn.empty() && flipTexCoords[underlying(stage.texCoordId)] != 0xFF;
     if (uvIn.empty()) {
       // No indirect texturing
       uvIn = fmt::format("tex{0}_uv", underlying(stage.texCoordId));
@@ -1438,9 +1458,22 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
     fragmentFnPre +=
         fmt::format("\n    float4 sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias);", i,
                     underlying(stage.texMapId), uvIn);
+    if (flips) {
+      // post_flip: x the older cell's weight, y the post matrix fading.
+      fragmentFnPre += fmt::format(
+          "\n    if (ubuf.post_flip.x > 0.0 && ubuf.post_flip.y == {3}.0) {{"
+          "\n        sampled{0} = lerp(sampled{0}, textureSampleBias(tex{1}, tex{1}_samp, tex{2}_flip_uv, "
+          "ubuf.tex{1}_size_bias), ubuf.post_flip.x);"
+          "\n    }}",
+          i, underlying(stage.texMapId), underlying(stage.texCoordId), flipTexCoords[underlying(stage.texCoordId)]);
+    }
   }
-  if (info.usesPTTexMtx.any())
+  if (info.usesPTTexMtx.any()) {
     uniBufAttrs += fmt::format("\n    float4x3 postmtx[{}];", MaxPTTexMtx);
+    if (info.postFlip) {
+      uniBufAttrs += "\n    float4x3 post_flip_mtx;\n    float4 post_flip;";
+    }
+  }
   if (info.usesFog) {
     uniformPre +=
         "\n"

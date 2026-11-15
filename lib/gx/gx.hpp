@@ -547,6 +547,8 @@ struct ShaderInfo {
   bool usesFog : 1 = false;
   bool usesFogRange : 1 = false;
   bool lightingEnabled : 1 = false;
+  // Its block holds a flipbook fade after the post matrices (room left, not lines).
+  bool postFlip : 1 = false;
   u8 lineMode : 2 = 0;
 };
 struct BindGroupRanges {
