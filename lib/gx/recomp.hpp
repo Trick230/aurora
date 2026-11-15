@@ -52,6 +52,13 @@ enum class StreamEvent : std::uint32_t {
 constexpr std::uint8_t HostViewOpcode = 0x70;
 constexpr std::uint32_t HostViewSize = 1 + 12 * 4;
 
+// And this one, which a game's hook writes in place of a model shape's call of
+// its primitive display list: the opcode, then the list's address and size
+// (big-endian), as GX_CMD_CALL_DL carries them. The list holds only draws and
+// indexed matrix loads, and the host draws it from a mesh it builds once.
+constexpr std::uint8_t HostShapeOpcode = 0x50;
+constexpr std::uint32_t HostShapeSize = 1 + 8;
+
 // And GX calls the host makes in place of the game's code (GX at the API): the
 // opcode, the call, its index, then its data as the game keeps it (big-endian
 // words). The host writes them where the call would have written its FIFO

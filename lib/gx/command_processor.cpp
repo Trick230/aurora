@@ -20,6 +20,7 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <string_view>
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
@@ -412,6 +413,8 @@ static void decode_fog_a() {
                         : std::ldexp(encoded, static_cast<int>(g_gxState.fog.fog2Raw & 0x1F));
 }
 
+static void handle_host_shape(u32 address, u32 dlSize, bool bigEndian);
+
 void process(const u8* data, u32 size, bool bigEndian) {
   u32 pos = 0;
 
@@ -535,6 +538,15 @@ void process(const u8* data, u32 size, bool bigEndian) {
         s_viewProjection.reset();
       }
       pos += recomp::HostViewSize - 1;
+      break;
+    }
+
+    case recomp::HostShapeOpcode: {
+      CHECK(pos + recomp::HostShapeSize - 1 <= size, "host shape read overrun");
+      const u32 address = read_u32(data + pos, true);
+      const u32 dlSize = read_u32(data + pos + 4, true);
+      pos += recomp::HostShapeSize - 1;
+      handle_host_shape(address, dlSize, bigEndian);
       break;
     }
 
@@ -2330,6 +2342,207 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices, arraySizes);
 }
 
+// Shapes (recomp::HostShapeOpcode): a model's primitive display list, only
+// draws and the indexed matrix loads between them, drawn from a mesh built
+// once. Each run of draws with one vertex format between loads becomes one
+// triangle list over its distinct vertices, so the strips and fans are not
+// walked and re-indexed every frame. A mesh is checked against the list's
+// bytes once a frame, so a list rewritten in place (another stage's model at
+// the same address) builds anew.
+namespace {
+struct ShapeOp {
+  bool draw = false; // else the indexed loads raw[first, first + count)
+  GXVtxFmt fmt = GX_VTXFMT0;
+  u32 vtxSize = 0;
+  u32 first = 0, count = 0;       // draw: its vertices, verts[first, first + count)
+  u32 idxFirst = 0, idxCount = 0; // draw: its triangles' indices in idx
+};
+struct ShapeMesh {
+  u64 hash = 0;
+  u32 size = 0;
+  u32 checkedFrame = UINT32_MAX;
+  bool cacheable = false;
+  std::vector<u8> raw;
+  std::vector<u8> verts;
+  std::vector<u16> idx;
+  std::vector<ShapeOp> ops;
+};
+absl::flat_hash_map<u32, ShapeMesh> s_shapes;
+} // namespace
+
+static bool build_shape(ShapeMesh& mesh, const u8* data, u32 size) {
+  mesh.raw.clear();
+  mesh.verts.clear();
+  mesh.idx.clear();
+  mesh.ops.clear();
+  // The keys view the list's own bytes, which outlive the build.
+  absl::flat_hash_map<std::string_view, u16> unique;
+  std::vector<u16> prim;
+  u32 pos = 0;
+  while (pos < size) {
+    const u8 cmd = data[pos];
+    const u8 opcode = cmd & CP_OPCODE_MASK;
+    if (cmd == CP_CMD_NOP) {
+      ++pos;
+    } else if (opcode == CP_CMD_LOAD_INDX_A || opcode == CP_CMD_LOAD_INDX_B || opcode == CP_CMD_LOAD_INDX_C ||
+               opcode == CP_CMD_LOAD_INDX_D) {
+      if (pos + 5 > size) {
+        return false;
+      }
+      if (mesh.ops.empty() || mesh.ops.back().draw) {
+        mesh.ops.push_back({.draw = false, .first = static_cast<u32>(mesh.raw.size())});
+      }
+      mesh.raw.insert(mesh.raw.end(), data + pos, data + pos + 5);
+      mesh.ops.back().count += 5;
+      pos += 5;
+    } else if (cmd >= 0x80 && cmd < 0xC0) {
+      const auto type = static_cast<GXPrimitive>(opcode);
+      if (type != GX_QUADS && type != GX_TRIANGLES && type != GX_TRIANGLESTRIP && type != GX_TRIANGLEFAN) {
+        return false;
+      }
+      const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
+      const u32 vtxSize = vertex_size(fmt);
+      if (pos + 3 > size || vtxSize == 0) {
+        return false;
+      }
+      const u32 n = read_u16(data + pos + 1, true);
+      pos += 3;
+      if (pos + n * vtxSize > size) {
+        return false;
+      }
+      ShapeOp* op = mesh.ops.empty() ? nullptr : &mesh.ops.back();
+      if (op == nullptr || !op->draw || op->fmt != fmt || op->vtxSize != vtxSize || op->count + n > UINT16_MAX) {
+        mesh.ops.push_back({.draw = true,
+                            .fmt = fmt,
+                            .vtxSize = vtxSize,
+                            .first = static_cast<u32>(mesh.verts.size() / vtxSize),
+                            .idxFirst = static_cast<u32>(mesh.idx.size())});
+        op = &mesh.ops.back();
+        unique.clear();
+      }
+      prim.resize(n);
+      for (u32 v = 0; v < n; ++v) {
+        const u8* vertex = data + pos + v * vtxSize;
+        const std::string_view key{reinterpret_cast<const char*>(vertex), vtxSize};
+        const auto [it, added] = unique.try_emplace(key, static_cast<u16>(op->count));
+        if (added) {
+          mesh.verts.insert(mesh.verts.end(), vertex, vertex + vtxSize);
+          ++op->count;
+        }
+        prim[v] = it->second;
+      }
+      pos += n * vtxSize;
+      // The windings prepare_idx_buffer gives the same primitives.
+      if (type == GX_QUADS) {
+        for (u32 q = 0; q + 4 <= n; q += 4) {
+          mesh.idx.insert(mesh.idx.end(), {prim[q], prim[q + 1], prim[q + 2], prim[q + 2], prim[q + 3], prim[q]});
+        }
+      } else if (type == GX_TRIANGLES) {
+        mesh.idx.insert(mesh.idx.end(), prim.begin(), prim.begin() + n / 3 * 3);
+      } else {
+        for (u32 v = 0; v < std::min<u32>(n, 3); ++v) {
+          mesh.idx.push_back(prim[v]);
+        }
+        for (u32 v = 3; v < n; ++v) {
+          if (type == GX_TRIANGLEFAN) {
+            mesh.idx.insert(mesh.idx.end(), {prim[0], prim[v - 1], prim[v]});
+          } else if ((v & 1) == 0) {
+            mesh.idx.insert(mesh.idx.end(), {prim[v - 2], prim[v - 1], prim[v]});
+          } else {
+            mesh.idx.insert(mesh.idx.end(), {prim[v - 1], prim[v - 2], prim[v]});
+          }
+        }
+      }
+      op->idxCount = static_cast<u32>(mesh.idx.size()) - op->idxFirst;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void draw_shape_op(const ShapeMesh& mesh, const ShapeOp& op, bool bigEndian) {
+  const u8* vertices = mesh.verts.data() + static_cast<size_t>(op.first) * op.vtxSize;
+  const u32 vtxCount = op.count;
+  const u32 totalVtxBytes = vtxCount * op.vtxSize;
+  std::array<u32, GX_VA_MAX_ATTR> arraySizes;
+  calculate_indexed_array_sizes(static_cast<u16>(vtxCount), vertices, bigEndian, arraySizes);
+  if (gfx::interp::enabled()) {
+    s_vtxMatrices = 0;
+    if (g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_NONE) {
+      for (u32 v = 0; v < vtxCount; ++v) {
+        s_vtxMatrices |= 1u << std::min<u32>(vertices[v * op.vtxSize] / 3, MaxPnMtx - 1);
+      }
+    }
+    s_vtxLayout = interp_vertex_layout(op.fmt, op.vtxSize, bigEndian);
+    s_vtxBytes = s_vtxLayout.stride != 0 ? std::span{vertices, totalVtxBytes} : std::span<const u8>{};
+    s_vtxPiece = totalVtxBytes;
+  }
+  size_t storageBytes = 0;
+  for (u32 a = 0; a < s_indexedLayout.count; ++a) {
+    const u32 attr = s_indexedLayout.attrs[a].attr;
+    const auto& array = g_gxState.arrays[attr];
+    const u32 requiredSize = std::min(array.size, arraySizes[attr]);
+    if (array.cachedRange.size < requiredSize || array.cachedRange.size == 0) {
+      storageBytes += requiredSize + 256;
+    }
+  }
+  const size_t idxBytes = op.idxCount * sizeof(u16);
+  if (!gfx::frame_has_room(totalVtxBytes + 4, idxBytes + 4, MaxUniformSize + 256 + 64 * 1024,
+                           storageBytes + 64 * 1024))
+    UNLIKELY {
+      ++gfx::g_droppedDrawCallCount;
+      return;
+    }
+  const gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes, 4);
+  auto& indices = gfx::index_staging(4);
+  const auto begin = static_cast<u32>(indices.size());
+  std::memcpy(indices.extend(idxBytes), mesh.idx.data() + op.idxFirst, idxBytes);
+  const gfx::Range idxRange{begin, static_cast<u32>(idxBytes)};
+  push_gx_draw(GX_TRIANGLES, op.fmt, static_cast<u16>(vtxCount), vertRange, idxRange, op.idxCount, arraySizes);
+}
+
+// The list as a call would run it, from its mesh when it can have one.
+static void handle_host_shape(u32 address, u32 dlSize, bool bigEndian) {
+  const void* dlData = nullptr;
+  u32 available = 0;
+  if (dlSize == 0 || !recomp::resolve_guest_address(address, dlSize, recomp::AddressSpace::Auto,
+                                                    recomp::ResourceKind::DisplayList, &dlData, &available)) {
+    return;
+  }
+  const auto* data = static_cast<const u8*>(dlData);
+  auto& mesh = s_shapes[address];
+  if (mesh.checkedFrame != gfx::current_frame() || mesh.size != dlSize) {
+    const u64 hash = XXH3_64bits(data, dlSize);
+    if (hash != mesh.hash || dlSize != mesh.size) {
+      mesh.hash = hash;
+      mesh.size = dlSize;
+      mesh.cacheable = build_shape(mesh, data, dlSize);
+    }
+    mesh.checkedFrame = gfx::current_frame();
+  }
+  bool ok = mesh.cacheable;
+  for (const ShapeOp& op : mesh.ops) {
+    if (op.draw && vertex_size(op.fmt) != op.vtxSize) {
+      ok = false; // built for another vertex descriptor
+    }
+  }
+  ++s_display_list_depth;
+  if (!ok) {
+    process(data, dlSize, bigEndian);
+  } else {
+    for (const ShapeOp& op : mesh.ops) {
+      if (op.draw) {
+        vertex_size(op.fmt); // the layout calculate_indexed_array_sizes reads
+        draw_shape_op(mesh, op, bigEndian);
+      } else {
+        process(mesh.raw.data() + op.first, op.count, bigEndian);
+      }
+    }
+  }
+  --s_display_list_depth;
+}
+
 // Vertex arrays uploaded this frame, by guest address. Like the GX vertex
 // cache, entries stay valid until the game issues GXInvalidateVtxCache, so
 // models that switch array bases between draws upload each array once.
@@ -2547,6 +2760,9 @@ u32 packet_size(const u8* data, u32 size) {
     break;
   case recomp::HostViewOpcode:
     need = recomp::HostViewSize;
+    break;
+  case recomp::HostShapeOpcode:
+    need = recomp::HostShapeSize;
     break;
   case recomp::HostGxOpcode:
     if (size < 2) {
